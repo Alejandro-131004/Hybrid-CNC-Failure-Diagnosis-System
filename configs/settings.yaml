@@ -1,0 +1,19 @@
+paths:
+  telemetry: "data/telemetry.csv"
+  labels: "data/labels.csv"
+  causes: "data/causes.csv"
+  components: "data/components.csv"
+  symptoms: "data/symptoms.csv"
+  procedures: "data/procedures.csv"
+  relations: "data/relations.csv"
+  maintenance: "data/maintenance.csv"
+
+continuous_cols:
+  - Temperature
+  - Vibration
+  - CoolantFlow
+
+evidence:
+  Temperature: 3
+  Vibration: 3
+  CoolantFlow: 0

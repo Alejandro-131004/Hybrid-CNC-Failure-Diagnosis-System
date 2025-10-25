@@ -4,11 +4,18 @@ from src.kg_module import build_graph, procedures_for_cause
 from src.decision import expected_cost_for_action, choose_action
 
 def load_miss_cost(maintenance_csv: str) -> dict:
-    """Lê custos de falha do ficheiro maintenance.csv."""
     df = pd.read_csv(maintenance_csv)
-    if "cause" not in df.columns or "failure_cost" not in df.columns:
-        raise ValueError("maintenance.csv deve conter colunas 'cause' e 'failure_cost'.")
-    return dict(zip(df["cause"], df["failure_cost"]))
+    # calcula custo médio aproximado com base na duração
+    avg_duration = df.groupby("action_type")["duration_h"].mean().to_dict()
+    hourly_rate = 100  # custo estimado por hora
+    # mapeamento causa ~ ação
+    mapping = {
+        "BearingWear": "replace_bearing",
+        "FanFault": "inspect_fan",
+        "CloggedFilter": "clean_filter"
+    }
+    return {cause: avg_duration[mapping[cause]] * hourly_rate for cause in mapping}
+
 
 def top_causes(posterior: dict[str,float], k: int = 3) -> dict[str,float]:
     return dict(sorted(posterior.items(), key=lambda x: x[1], reverse=True)[:k])

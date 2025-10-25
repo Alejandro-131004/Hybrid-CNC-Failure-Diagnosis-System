@@ -9,9 +9,9 @@ paths:
   maintenance: "data/maintenance.csv"
 
 continuous_cols:
-  - Temperature
-  - Vibration
-  - CoolantFlow
+  - spindle_temp
+  - vibration_rms
+  - coolant_flow
 
 evidence:
   Temperature: 3

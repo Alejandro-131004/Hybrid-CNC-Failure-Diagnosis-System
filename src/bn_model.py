@@ -4,7 +4,7 @@ from pgmpy.estimators import HillClimbSearch, BicScore, MaximumLikelihoodEstimat
 from pgmpy.models import BayesianNetwork
 from pgmpy.inference import VariableElimination
 
-TARGET = "Overheat"  # coluna binária em labels.csv
+TARGET = "spindle_overheat"  # coluna binária em labels.csv
 
 def load_telemetry(telemetry_csv: str, labels_csv: str) -> pd.DataFrame:
     """Junta sensores (telemetry.csv) e labels (labels.csv)."""
@@ -19,11 +19,11 @@ def discretize(df: pd.DataFrame, continuous_cols: list[str], n_bins: int = 4) ->
     dfx[continuous_cols] = enc.fit_transform(dfx[continuous_cols])
     return dfx
 
-def learn_structure(df_disc: pd.DataFrame) -> BayesianNetwork:
-    """Aprende estrutura BN via Hill-Climb + BIC."""
-    hc = HillClimbSearch(df_disc, scoring_method=BicScore(df_disc))
-    model = hc.estimate()
-    return model
+def learn_structure(df_disc: pd.DataFrame):
+    """Learn BN structure using Hill-Climb with BIC scoring (updated for pgmpy>=0.1.25)."""
+    hc = HillClimbSearch(df_disc)
+    best_model = hc.estimate(scoring_method=BicScore(df_disc))
+    return best_model
 
 def fit_parameters(model: BayesianNetwork, df_disc: pd.DataFrame) -> BayesianNetwork:
     """Ajusta CPDs (Maximum Likelihood)."""

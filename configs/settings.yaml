@@ -1,19 +1,19 @@
-paths:
-  telemetry: "data/telemetry.csv"
-  labels: "data/labels.csv"
-  causes: "data/causes.csv"
-  components: "data/components.csv"
-  symptoms: "data/symptoms.csv"
-  procedures: "data/procedures.csv"
-  relations: "data/relations.csv"
-  maintenance: "data/maintenance.csv"
-
-continuous_cols:
-  - spindle_temp
-  - vibration_rms
-  - coolant_flow
-
-evidence:
-  Temperature: 3
-  Vibration: 3
-  CoolantFlow: 0
+data_dir: "data"
+files:
+  telemetry: "telemetry.csv"
+  labels: "labels.csv"
+  components: "components.csv"
+  causes: "causes.csv"
+  symptoms: "symptoms.csv"
+  procedures: "procedures.csv"
+  relations: "relations.csv"
+bn:
+  discretize_bins: 4
+  sensors: ["spindle_temp","ambient_temp","vibration_rms","coolant_flow",
+            "feed_rate","spindle_speed","load_pct","power_kw","tool_wear"]
+decision:
+  cost:
+    Continue: 0
+    SlowDown_per_hour: 50
+    ScheduleMaintenance_base: 200
+  risk_weight: 1.0

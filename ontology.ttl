@@ -1,15 +1,16 @@
-@prefix ex: <http://example.org/cnc#> .
+@prefix ex: <http://hybridcnc.org/ontology#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
 
 #################################################################
 # === Ontology metadata ===
 #################################################################
 
-ex:CNCOntology a rdf:Description ;
+ex:CNCOntology a owl:Ontology ;
     rdfs:label "Hybrid CNC Failure Diagnosis Ontology" ;
-    rdfs:comment "Ontology describing components, causes, symptoms, and maintenance procedures for CNC spindle failure diagnosis." .
+    rdfs:comment "Ontology describing components, causes, symptoms, sensors, and maintenance procedures for CNC spindle failure diagnosis." .
 
 #################################################################
 # === Core classes ===
@@ -21,7 +22,7 @@ ex:Component a rdfs:Class ;
 
 ex:Sensor a rdfs:Class ;
     rdfs:label "Sensor" ;
-    rdfs:comment "Measurement device providing telemetry data such as temperature, vibration, coolant flow." .
+    rdfs:comment "Measurement device providing telemetry data such as temperature, vibration, or coolant flow." .
 
 ex:Symptom a rdfs:Class ;
     rdfs:label "Symptom" ;
@@ -40,7 +41,7 @@ ex:ActionRecommendation a rdfs:Class ;
     rdfs:comment "System decision suggesting whether to continue operation, slow down, or schedule maintenance." .
 
 #################################################################
-# === Relationships between entities ===
+# === Object properties (relationships) ===
 #################################################################
 
 # Symptom detection
@@ -86,7 +87,7 @@ ex:recommendedAction a rdf:Property ;
     rdfs:comment "Links a maintenance procedure to a general system recommendation (e.g., slow down, maintenance, continue)." .
 
 #################################################################
-# === Attributes (data properties) ===
+# === Datatype properties (attributes) ===
 #################################################################
 
 # Sensor attributes
@@ -122,7 +123,7 @@ ex:risk a rdf:Property ;
     rdfs:comment "Operational risk level associated with executing the maintenance procedure (e.g., low, medium, high)." .
 
 #################################################################
-# === Example individuals (optional) ===
+# === Example individuals (instances) ===
 #################################################################
 
 # Components

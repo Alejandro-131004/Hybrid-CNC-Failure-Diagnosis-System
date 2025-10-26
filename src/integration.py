@@ -1,57 +1,102 @@
-import pandas as pd
-from src.bn_model import load_telemetry, discretize, learn_structure, fit_parameters, make_inferencer, TARGET
-from src.kg_module import build_graph, procedures_for_cause
-from src.decision import expected_cost_for_action, choose_action
+"""
+integration.py
+Pipeline connecting Bayesian Network (BN) inference with Knowledge Graph (KG)
+and Decision Module for hybrid CNC fault diagnosis — with detailed debug prints.
+"""
 
-def load_miss_cost(maintenance_csv: str) -> dict:
-    df = pd.read_csv(maintenance_csv)
-    # calcula custo médio aproximado com base na duração
-    avg_duration = df.groupby("action_type")["duration_h"].mean().to_dict()
-    hourly_rate = 100  # custo estimado por hora
-    # mapeamento causa ~ ação
-    mapping = {
-        "BearingWear": "replace_bearing",
-        "FanFault": "inspect_fan",
-        "CloggedFilter": "clean_filter"
-    }
-    return {cause: avg_duration[mapping[cause]] * hourly_rate for cause in mapping}
+from .utils import load_cfg, path_for
+from .bn_model import (
+    build_manual_bn,
+    add_manual_cpds,
+    infer_overheat_prob,
+    make_inferencer,
+)
+from .kg_module import CNCKG
+from .decision import choose_action
 
 
-def top_causes(posterior: dict[str,float], k: int = 3) -> dict[str,float]:
-    return dict(sorted(posterior.items(), key=lambda x: x[1], reverse=True)[:k])
+def run_demo(evidence: dict):
+    """
+    Runs an integrated hybrid reasoning cycle:
+    1. Bayesian inference → Overheat probability and top cause
+    2. Knowledge Graph query → maintenance procedure(s)
+    3. Decision computation → optimal recommended action
+    """
 
-def run_pipeline(paths: dict, continuous_cols: list[str], evidence: dict[str,int]):
-    miss_cost = load_miss_cost(paths["maintenance"])
+    print("=== [STEP 1] LOADING CONFIGURATION ===")
+    cfg = load_cfg()
 
-    # === Bayesian Network ===
-    df = load_telemetry(paths["telemetry"], paths["labels"])
-    dfd = discretize(df, continuous_cols)
-    model = fit_parameters(learn_structure(dfd), dfd)
-    inf = make_inferencer(model)
+    # === Step 1. Bayesian Network inference ===
+    print("\n=== [STEP 2] INITIALIZING BAYESIAN NETWORK ===")
+    model = build_manual_bn()
+    model = add_manual_cpds(model)
+    print("[BN] Structure defined manually with causal relations and fixed CPDs.")
 
-    causes = pd.read_csv(paths["causes"])["name"].tolist()
-    posterior = {}
-    for c in causes:
+    # Overheat inference
+    print("\n=== [STEP 3] BAYESIAN INFERENCE ===")
+    print(f"[Evidence] Provided sensor states: {evidence}")
+    p_overheat = infer_overheat_prob(model, evidence)
+    print(f"[Result] P(Overheat=1 | Evidence) = {p_overheat:.3f}")
+
+    # Cause probabilities
+    infer = make_inferencer(model)
+    cause_nodes = ["BearingWear", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
+    cause_probs = {}
+    for c in cause_nodes:
         try:
-            q = inf.query(variables=[c], evidence=evidence)
-            valmap = dict(enumerate(q.values))
-            posterior[c] = valmap.get(1, max(valmap.values()))
-        except Exception:
-            continue
-    p_top = top_causes(posterior)
+            q = infer.query(variables=[c], evidence=evidence)
+            cause_probs[c] = float(q.values[1])
+            print(f"[Cause] P({c}=1 | Evidence) = {cause_probs[c]:.3f}")
+        except Exception as e:
+            print(f"[WARN] Could not infer {c}: {e}")
 
-    # === Knowledge Graph ===
-    g = build_graph(paths["components"], paths["causes"], paths["symptoms"], paths["procedures"], paths["relations"])
+    top_cause = max(cause_probs, key=cause_probs.get) if cause_probs else None
+    print(f"\n[BN] Top inferred root cause = {top_cause}")
+    print("[Explanation] This is the node with the highest posterior probability given the evidence.")
 
-    action_map = {c: procedures_for_cause(g, c) for c in p_top}
+    # === Step 2. Knowledge Graph reasoning ===
+    print("\n=== [STEP 4] KNOWLEDGE GRAPH QUERIES ===")
+    kg = CNCKG().load_from_cfg(cfg)
+    if top_cause:
+        procedures = kg.procedures_for_cause(top_cause)
+        components = kg.components_for_cause(top_cause)
+        symptoms = kg.symptoms_for_cause(top_cause)
+    else:
+        procedures, components, symptoms = [], [], []
 
-    # === Decision logic ===
-    ec = expected_cost_for_action(p_top, action_map, miss_cost)
-    act, ec_val = choose_action(ec)
+    print(f"[KG] Found {len(procedures)} procedure(s), {len(components)} component(s), {len(symptoms)} symptom(s) for {top_cause}")
+    print(f"[KG] Procedures: {procedures or 'none'}")
+    print(f"[KG] Components: {components or 'none'}")
+    print(f"[KG] Symptoms: {symptoms or 'none'}")
 
-    return {
-        "posterior": p_top,
-        "actions": action_map,
-        "expected_costs": ec,
-        "recommendation": {"action": act, "expected_cost": ec_val}
+    # === Step 3. Decision analysis ===
+    print("\n=== [STEP 5] DECISION ANALYSIS (BAYES DECISION THEORY) ===")
+    print("[Formula] Expected cost = Action cost + RiskWeight × P(Overheat) × FailurePenalty")
+
+    procedures_csv = path_for(cfg, "procedures")
+    action, costs = choose_action(p_overheat, top_cause, cfg, procedures_csv)
+
+    for act, val in costs.items():
+        print(f"[Decision] Expected cost({act}) = {val:.2f}")
+
+    print(f"\n[Decision] Recommended action = {action}")
+    print("[Reason] The selected action minimizes the expected cost given the inferred failure probability.")
+
+    # === Output summary ===
+    result = {
+        "p_overheat": round(p_overheat, 3),
+        "top_cause": top_cause,
+        "probabilities": cause_probs,
+        "components": components,
+        "symptoms": symptoms,
+        "procedures": procedures,
+        "recommended_action": action,
+        "expected_costs": costs,
     }
+
+    print("\n=== [SUMMARY] HYBRID REASONING RESULT ===")
+    for k, v in result.items():
+        print(f"{k}: {v}")
+
+    print("\n[Done] End of hybrid reasoning cycle.\n")
+    return result

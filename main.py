@@ -3,28 +3,22 @@ main.py
 Entry point for the Hybrid CNC Diagnosis System
 """
 
-from src.integration import run_demo
+from src.integration import run_demo, run_real
 
 if __name__ == "__main__":
-    # === Example sensor evidence ===
-    # 0 = normal / low, 1 = high / abnormal
+
+    # Ask user which mode to run
+    mode = input("Run with MANUAL CPDs (demo) or REAL learned model? (demo/real): ").strip().lower()
+    debug = input("Enable DEBUG mode? (y/n): ").strip().lower() == "y"
+
+    # Example binary evidence (0 = normal, 1 = abnormal)
     evidence = {
-        "Vibration": 1,      # high vibration
-        "CoolantFlow": 1,    # low coolant flow
-        "SpindleTemp": 65     # normal temperature
+        "Vibration": 1,
+        "CoolantFlow": 1,
+        "SpindleTemp": 0
     }
 
-    # Run the integrated reasoning pipeline
-    result = run_demo(evidence)
-
-    # Display results
-    print("\n=== Posterior Probabilities ===")
-    for c, p in result["probabilities"].items():
-        print(f"{c}: {p:.2f}")
-
-    print("\n=== Expected Costs ===")
-    for a, c in result["expected_costs"].items():
-        print(f"{a}: {c:.2f}")
-
-    print("\n=== Recommended Action ===")
-    print(result["recommended_action"])
+    if mode == "real":
+        result = run_real(evidence, debug=debug)
+    else:
+        result = run_demo(evidence, debug=debug)

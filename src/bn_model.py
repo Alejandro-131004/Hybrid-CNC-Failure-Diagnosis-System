@@ -37,11 +37,14 @@ def discretize(df: pd.DataFrame, continuous_cols: list[str], n_bins: int = 4) ->
 # === Data-driven learning (Hill-Climb)
 # ==============================================================
 
-def learn_structure(df_disc: pd.DataFrame):
-    """Learn BN structure using Hill-Climbing and BIC score."""
+def learn_structure(df_disc: pd.DataFrame) -> BayesianNetwork:
+    """Learn BN structure using Hill-Climbing and return a BayesianNetwork."""
     hc = HillClimbSearch(df_disc)
-    best_model = hc.estimate(scoring_method=BicScore(df_disc))
-    return best_model
+    dag = hc.estimate(scoring_method=BicScore(df_disc))
+    # Convert edges into a BayesianNetwork object
+    model = BayesianNetwork(dag.edges())
+    return model
+
 
 
 def fit_parameters(model: BayesianNetwork, df_disc: pd.DataFrame) -> BayesianNetwork:
@@ -144,4 +147,35 @@ def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: i
     """
     em = ExpectationMaximization(model)
     em.fit(df_disc, max_iter=max_iter)
+    return model
+
+def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: int = 50):
+    """
+    Fit CPDs using the EM algorithm (supports latent variables and missing data).
+    """
+    em = ExpectationMaximization(model)
+    em.fit(df_disc, max_iter=max_iter)
+    return model
+
+
+def integrate_latent_causes(model: BayesianNetwork) -> BayesianNetwork:
+    """
+    Integrates latent cause variables into the learned BN structure and adds
+    domain-driven causal edges between unobserved causes and observable sensors.
+    """
+    latent = ["BearingWearHigh", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
+    for c in latent:
+        if c not in model.nodes():
+            model.add_node(c)
+
+    edges = [
+        ("BearingWearHigh", "Vibration"),
+        ("FanFault", "SpindleTemp"),
+        ("CloggedFilter", "CoolantFlow"),
+        ("LowCoolingEfficiency", "SpindleTemp"),
+    ]
+    for u, v in edges:
+        if (u, v) not in model.edges():
+            model.add_edge(u, v)
+
     return model

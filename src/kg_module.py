@@ -48,9 +48,10 @@ class CNCKG:
     Integrates ontology classes and properties with instances from CSV data.
     """
 
-    def __init__(self):
+    def __init__(self, debug=True):
         self.g = Graph()
         self.g.bind("ex", EX)
+        self.debug = debug
 
     # ----------------------------------------------------------
     # Utility: create URIRef safely
@@ -70,7 +71,8 @@ class CNCKG:
         # 1. Parse the base ontology (classes + properties)
         try:
             self.g.parse(ontology_path, format="turtle")
-            print(f"Ontology loaded: {ontology_path}")
+            if self.debug:
+                print(f"Ontology loaded: {ontology_path}")
         except Exception as e:
             print(f"Warning: could not parse ontology ({e})")
 
@@ -95,7 +97,8 @@ class CNCKG:
             obj = self._uri(r["obj"])
             self.g.add((subj, pred, obj))
 
-        print(f"Knowledge Graph populated with {len(self.g)} triples.")
+        if self.debug:
+            print(f"Knowledge Graph populated with {len(self.g)} triples.")
         return self
 
     # ----------------------------------------------------------

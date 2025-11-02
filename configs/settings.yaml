@@ -17,3 +17,5 @@ decision:
     SlowDown_per_hour: 50
     ScheduleMaintenance_base: 200
   risk_weight: 1.0
+
+debug: true

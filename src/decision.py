@@ -46,8 +46,8 @@ def choose_action(p_overheat: float, top_cause: str | None, cfg, procedures_csv:
     proc_cost = None
     try:
         df = pd.read_csv(procedures_csv)
-        if top_cause and "cause" in df.columns and "cost" in df.columns:
-            row = df[df["cause"] == top_cause]
+        if top_cause and "mitigates_cause" in df.columns and "cost" in df.columns:
+            row = df[df["mitigates_cause"] == top_cause]
             if not row.empty:
                 proc_cost = float(row["cost"].iloc[0])
     except Exception:

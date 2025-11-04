@@ -41,132 +41,99 @@ ex:ActionRecommendation a rdfs:Class ;
     rdfs:comment "System decision suggesting whether to continue operation, slow down, or schedule maintenance." .
 
 #################################################################
-# === Object properties (relationships) ===
+# === Object properties (relationships)
 #################################################################
 
-# Symptom detection
-ex:detectedBy a rdf:Property ;
-    rdfs:domain ex:Symptom ;
-    rdfs:range ex:Sensor ;
-    rdfs:label "detected by" ;
-    rdfs:comment "Indicates which sensor detects a particular symptom." .
-
-# Cause–Symptom linkage
-ex:hasSymptom a rdf:Property ;
+# CSV-driven alignment
+ex:causesSymptom a rdf:Property ;
     rdfs:domain ex:Cause ;
     rdfs:range ex:Symptom ;
-    rdfs:label "has symptom" ;
-    rdfs:comment "Relates a cause to the symptom(s) it produces." .
+    rdfs:label "causes symptom" .
 
-# Cause–Component linkage
-ex:affects a rdf:Property ;
+ex:affectsComponent a rdf:Property ;
     rdfs:domain ex:Cause ;
     rdfs:range ex:Component ;
-    rdfs:label "affects component" ;
-    rdfs:comment "Indicates that a cause degrades or influences a specific component." .
+    rdfs:label "affects component" .
 
-# Cause–Procedure linkage
-ex:fixedBy a rdf:Property ;
-    rdfs:domain ex:Cause ;
-    rdfs:range ex:Procedure ;
-    rdfs:label "fixed by" ;
-    rdfs:comment "Indicates which maintenance procedure resolves a given cause." .
-
-# Component–Sensor linkage
-ex:monitoredBy a rdf:Property ;
-    rdfs:domain ex:Component ;
-    rdfs:range ex:Sensor ;
-    rdfs:label "monitored by" ;
-    rdfs:comment "Defines which sensor monitors a given component." .
-
-# Procedure–Recommendation linkage
-ex:recommendedAction a rdf:Property ;
+ex:mitigates_cause a rdf:Property ;
     rdfs:domain ex:Procedure ;
-    rdfs:range ex:ActionRecommendation ;
-    rdfs:label "recommended action" ;
-    rdfs:comment "Links a maintenance procedure to a general system recommendation (e.g., slow down, maintenance, continue)." .
+    rdfs:range ex:Cause ;
+    rdfs:label "mitigates cause" .
+
+# Legacy ontology properties (still valid)
+ex:hasSymptom a rdf:Property .
+ex:affects a rdf:Property .
+ex:fixedBy a rdf:Property .
+ex:monitoredBy a rdf:Property .
+ex:recommendedAction a rdf:Property .
 
 #################################################################
-# === Datatype properties (attributes) ===
+# === Datatype properties (attributes)
 #################################################################
 
-# Sensor attributes
 ex:unit a rdf:Property ;
     rdfs:domain ex:Sensor ;
-    rdfs:range xsd:string ;
-    rdfs:label "unit" ;
-    rdfs:comment "Measurement unit of the sensor (e.g., °C, mm/s, L/min)." .
+    rdfs:range xsd:string .
 
 ex:measurementType a rdf:Property ;
     rdfs:domain ex:Sensor ;
-    rdfs:range xsd:string ;
-    rdfs:label "measurement type" ;
-    rdfs:comment "Type of signal or variable measured by the sensor." .
+    rdfs:range xsd:string .
 
-# Procedure attributes
 ex:cost a rdf:Property ;
     rdfs:domain ex:Procedure ;
-    rdfs:range xsd:float ;
-    rdfs:label "cost" ;
-    rdfs:comment "Estimated cost of executing the maintenance procedure in euros." .
+    rdfs:range xsd:float .
 
 ex:timeH a rdf:Property ;
     rdfs:domain ex:Procedure ;
-    rdfs:range xsd:float ;
-    rdfs:label "time (hours)" ;
-    rdfs:comment "Time in hours required to execute the procedure." .
+    rdfs:range xsd:float .
 
 ex:risk a rdf:Property ;
     rdfs:domain ex:Procedure ;
-    rdfs:range xsd:string ;
-    rdfs:label "risk level" ;
-    rdfs:comment "Operational risk level associated with executing the maintenance procedure (e.g., low, medium, high)." .
+    rdfs:range xsd:string .
 
 #################################################################
-# === Example individuals (instances) ===
+# === Example individuals (instances)
 #################################################################
 
 # Components
-ex:Spindle a ex:Component ; rdfs:label "Spindle" .
-ex:CoolingSystem a ex:Component ; rdfs:label "Cooling System" .
+ex:Spindle a ex:Component .
+ex:CoolingSystem a ex:Component .
 
 # Causes
-ex:BearingWear a ex:Cause ; rdfs:label "Bearing Wear" .
-ex:FanFault a ex:Cause ; rdfs:label "Fan Fault" .
-ex:CloggedFilter a ex:Cause ; rdfs:label "Clogged Filter" .
+ex:BearingWearHigh a ex:Cause .
+ex:FanFault a ex:Cause .
+ex:CloggedFilter a ex:Cause .
+ex:LowCoolingEfficiency a ex:Cause .
 
 # Symptoms
-ex:HighVibration a ex:Symptom ; rdfs:label "High Vibration" .
-ex:LowCoolantFlow a ex:Symptom ; rdfs:label "Low Coolant Flow" .
+ex:HighVibration a ex:Symptom .
+ex:HighSpindleTemp a ex:Symptom .
+ex:LowCoolantFlow a ex:Symptom .
 
 # Procedures
-ex:ReplaceBearing a ex:Procedure ;
-    rdfs:label "Replace Bearing" ;
-    ex:cost 600.0 ;
-    ex:timeH 6.0 ;
-    ex:risk "low" .
+ex:ReplaceBearing a ex:Procedure .
+ex:RepairFan a ex:Procedure .
+ex:CleanFilter a ex:Procedure .
+ex:FlushCoolant a ex:Procedure .
 
-ex:RepairFan a ex:Procedure ;
-    rdfs:label "Repair Fan" ;
-    ex:cost 400.0 ;
-    ex:timeH 4.0 ;
-    ex:risk "medium" .
+#################################################################
+# === Relations
+#################################################################
 
-ex:CleanFilter a ex:Procedure ;
-    rdfs:label "Clean Filter" ;
-    ex:cost 200.0 ;
-    ex:timeH 2.0 ;
-    ex:risk "low" .
+# Cause → Symptom
+ex:BearingWearHigh ex:causesSymptom ex:HighVibration .
+ex:FanFault ex:causesSymptom ex:HighSpindleTemp .
+ex:CloggedFilter ex:causesSymptom ex:LowCoolantFlow .
+ex:LowCoolingEfficiency ex:causesSymptom ex:HighSpindleTemp .
 
-# Relations
-ex:BearingWear ex:affects ex:Spindle ;
-               ex:hasSymptom ex:HighVibration ;
-               ex:fixedBy ex:ReplaceBearing .
+# Cause → Component
+ex:BearingWearHigh ex:affectsComponent ex:Bearing .
+ex:FanFault ex:affectsComponent ex:Fan .
+ex:CloggedFilter ex:affectsComponent ex:Filter .
+ex:LowCoolingEfficiency ex:affectsComponent ex:CoolingSystem .
 
-ex:FanFault ex:affects ex:CoolingSystem ;
-            ex:hasSymptom ex:LowCoolantFlow ;
-            ex:fixedBy ex:RepairFan .
-
-ex:CloggedFilter ex:affects ex:CoolingSystem ;
-                 ex:hasSymptom ex:LowCoolantFlow ;
-                 ex:fixedBy ex:CleanFilter .
+# Procedure → Cause
+ex:ReplaceBearing ex:mitigates_cause ex:BearingWearHigh .
+ex:RepairFan ex:mitigates_cause ex:FanFault .
+ex:CleanFilter ex:mitigates_cause ex:CloggedFilter .
+ex:FlushCoolant ex:mitigates_cause ex:LowCoolingEfficiency .

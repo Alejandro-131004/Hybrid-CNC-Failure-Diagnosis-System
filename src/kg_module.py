@@ -93,9 +93,19 @@ class CNCKG:
         rel = load_csv(cfg, "relations")
         for _, r in rel.iterrows():
             subj = self._uri(r["subj"])
-            pred = self._uri(r["pred"])
+            raw_pred = r["pred"]
             obj = self._uri(r["obj"])
+
+            # Normalize predicates
+            mapping = {
+                "causesSymptom": "hasSymptom",
+                "affectsComponent": "affects"
+            }
+
+            pred = self._uri(mapping.get(raw_pred, raw_pred))
+
             self.g.add((subj, pred, obj))
+
 
         if self.debug:
             print(f"Knowledge Graph populated with {len(self.g)} triples.")
@@ -105,14 +115,14 @@ class CNCKG:
     # Query 1: Get procedure(s) that fix a cause
     # ----------------------------------------------------------
     def procedures_for_cause(self, cause_str: str):
-        """Returns list of procedures that fix a given cause."""
         q = f"""
         PREFIX ex: <{EX}>
         SELECT ?proc WHERE {{
-          ex:{cause_str.replace(' ', '_')} ex:fixedBy ?proc .
+        ?proc ex:mitigates_cause ex:{cause_str.replace(' ', '_')} .
         }}
         """
         return [str(row.proc).split("#")[-1] for row in self.g.query(q)]
+
 
     # ----------------------------------------------------------
     # Query 2: Get component(s) affected by a cause
@@ -122,7 +132,7 @@ class CNCKG:
         q = f"""
         PREFIX ex: <{EX}>
         SELECT ?comp WHERE {{
-          ex:{cause_str.replace(' ', '_')} ex:affects ?comp .
+          ex:{cause_str} ex:affectsComponent ?comp
         }}
         """
         return [str(row.comp).split("#")[-1] for row in self.g.query(q)]
@@ -135,7 +145,7 @@ class CNCKG:
         q = f"""
         PREFIX ex: <{EX}>
         SELECT ?sym WHERE {{
-          ex:{cause_str.replace(' ', '_')} ex:hasSymptom ?sym .
+          ex:{cause_str} ex:causesSymptom ?sym
         }}
         """
         return [str(row.sym).split("#")[-1] for row in self.g.query(q)]

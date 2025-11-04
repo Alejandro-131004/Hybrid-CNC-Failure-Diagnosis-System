@@ -65,27 +65,28 @@ def make_inferencer(model: BayesianNetwork) -> VariableElimination:
 def build_manual_bn() -> BayesianNetwork:
     """Define the BN structure based on known physical and causal relations."""
     model = BayesianNetwork([
-        ('BearingWear', 'Vibration'),
+        ('BearingWearHigh', 'Vibration'),
         ('FanFault', 'SpindleTemp'),
         ('CloggedFilter', 'CoolantFlow'),
         ('LowCoolingEfficiency', 'SpindleTemp'),
-        ('Vibration', 'Overheat'),
-        ('SpindleTemp', 'Overheat'),
-        ('CoolantFlow', 'Overheat')
+        ('Vibration', 'spindle_overheat'),
+        ('SpindleTemp', 'spindle_overheat'),
+        ('CoolantFlow', 'spindle_overheat')
+
     ])
     return model
 
 
 def add_manual_cpds(model: BayesianNetwork) -> BayesianNetwork:
     """Add pre-defined CPDs (domain-based)."""
-    cpd_bearing = TabularCPD('BearingWear', 2, [[0.9], [0.1]]) # Prior: 90% normal bearing, 10% worn (root node)
+    cpd_bearing = TabularCPD('BearingWearHigh', 2, [[0.9], [0.1]]) # Prior: 90% normal bearing, 10% worn (root node)
     cpd_fan = TabularCPD('FanFault', 2, [[0.95], [0.05]])
     cpd_filter = TabularCPD('CloggedFilter', 2, [[0.9], [0.1]])
     cpd_cooling = TabularCPD('LowCoolingEfficiency', 2, [[0.85], [0.15]])
 
     cpd_vibration = TabularCPD(
         'Vibration', 2, [[0.95, 0.4], [0.05, 0.6]],
-        evidence=['BearingWear'], evidence_card=[2]
+        evidence=['BearingWearHigh'], evidence_card=[2]
     )
 
     cpd_temp = TabularCPD(
@@ -102,7 +103,7 @@ def add_manual_cpds(model: BayesianNetwork) -> BayesianNetwork:
     )
 
     cpd_overheat = TabularCPD(
-        'Overheat', 2,
+        'spindle_overheat', 2,
         [[0.99, 0.9, 0.85, 0.3, 0.6, 0.2, 0.1, 0.01],
          [0.01, 0.1, 0.15, 0.7, 0.4, 0.8, 0.9, 0.99]],
         evidence=['Vibration', 'SpindleTemp', 'CoolantFlow'],
@@ -118,7 +119,7 @@ def add_manual_cpds(model: BayesianNetwork) -> BayesianNetwork:
 def example_inference(model: BayesianNetwork):
     """Run a simple test inference."""
     infer = VariableElimination(model)
-    q = infer.query(variables=['Overheat'], evidence={'Vibration': 1, 'CoolantFlow': 1})
+    q = infer.query(variables=['spindle_overheat'], evidence={'Vibration': 1, 'CoolantFlow': 1})
     print(q)
     return q
 
@@ -135,19 +136,21 @@ def learn_from_cfg(cfg, telemetry_key="telemetry", labels_key="labels"):
 
 def infer_overheat_prob(model, evidence: dict):
     infer = make_inferencer(model)
-    q = infer.query(variables=["Overheat"], evidence=evidence)
-    return float(q.values[1])  # P(Overheat=1)
+    
+    # sanitizing the evidence (essential in REAL mode)
+    ev = {}
+    for k, v in (evidence or {}).items():
+        if k in model.nodes():
+            card = model.get_cardinality(k)
+            if card == 2:
+                ev[k] = int(v)
+            else:
+                # binary mapping → largest bin in discretization
+                ev[k] = 0 if int(v) == 0 else card - 1
 
+    q = infer.query(variables=["spindle_overheat"], evidence=ev if ev else None)
+    return float(q.values[1])  # probability of the “failure” state
 
-def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: int = 100):
-    """
-    Estimate CPDs with EM (handles hidden/latent variables and missing data).
-    Assumes df_disc contém nós observáveis (sensores, Overheat) e
-    não contém as causas latentes (ficam como hidden).
-    """
-    em = ExpectationMaximization(model)
-    em.fit(df_disc, max_iter=max_iter)
-    return model
 
 def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: int = 50):
     """
@@ -158,7 +161,10 @@ def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: i
     return model
 
 
-def integrate_latent_causes(model: BayesianNetwork) -> BayesianNetwork:
+def integrate_latent_causes(model: BayesianNetwork,
+                            vib_node="Vibration",
+                            temp_node="SpindleTemp",
+                            flow_node="CoolantFlow") -> BayesianNetwork:    
     """
     Integrates latent cause variables into the learned BN structure and adds
     domain-driven causal edges between unobserved causes and observable sensors.
@@ -169,13 +175,14 @@ def integrate_latent_causes(model: BayesianNetwork) -> BayesianNetwork:
             model.add_node(c)
 
     edges = [
-        ("BearingWearHigh", "Vibration"),
-        ("FanFault", "SpindleTemp"),
-        ("CloggedFilter", "CoolantFlow"),
-        ("LowCoolingEfficiency", "SpindleTemp"),
+        ("BearingWearHigh", vib_node),
+        ("FanFault",        temp_node),
+        ("CloggedFilter",   flow_node),
+        ("LowCoolingEfficiency", temp_node),
     ]
     for u, v in edges:
-        if (u, v) not in model.edges():
+        if v in model.nodes() and (u, v) not in model.edges():
             model.add_edge(u, v)
-
     return model
+
+

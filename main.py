@@ -13,11 +13,11 @@ if __name__ == "__main__":
 
     # Example binary evidence (0 = normal, 1 = abnormal)
     evidence = {
-        "Vibration": 1,
-        "CoolantFlow": 1,
-        "SpindleTemp": 0
+        "vibration_rms":1,
+        "coolant_flow":1, 
+        "spindle_temp":0
     }
-
+    
     if mode == "real":
         result = run_real(evidence, debug=debug)
     else:

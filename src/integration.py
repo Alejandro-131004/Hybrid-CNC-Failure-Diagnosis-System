@@ -50,7 +50,7 @@ def run_demo(evidence: dict, debug=True, model_override=None):
 
     infer = make_inferencer(model)
 
-    cause_nodes = ["BearingWear", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
+    cause_nodes = ["BearingWearHigh", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
     cause_probs = {}
 
     for c in cause_nodes:
@@ -166,12 +166,15 @@ def run_real(evidence: dict, debug=False):
     model = learn_structure(df_disc)
 
     # Inject latent unobserved causes
-    model = integrate_latent_causes(model)
+    model = integrate_latent_causes(
+        model,
+        vib_node="vibration_rms",
+        temp_node="spindle_temp",
+        flow_node="coolant_flow",
+    )
 
     # Fit parameters using EM because latent causes have no direct labels
     model = fit_parameters_em(model, df_disc, max_iter=50)
-
-
 
     # Reuse the same reasoning pipeline with learned model
     return run_demo(evidence, debug=debug, model_override=model)

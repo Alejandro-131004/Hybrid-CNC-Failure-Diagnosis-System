@@ -134,8 +134,12 @@ def run_demo(evidence: dict, debug=True, model_override=None):
         vib_val = evidence.get("Vibration", evidence.get("vibration_rms", "N/A"))
         flow_val = evidence.get("CoolantFlow", evidence.get("coolant_flow", "N/A"))
 
+        # Map binary values to readable states
+        vib_state = "High" if int(evidence.get("Vibration", evidence.get("vibration_rms", 0))) == 1 else "Normal"
+        flow_state = "Low" if int(evidence.get("CoolantFlow", evidence.get("coolant_flow", 0))) == 1 else "Normal"
+        
         print(
-            f"\nBecause Vibration={vib_val} and CoolantFlow={flow_val}, "
+            f"\nBecause Vibration={vib_state} and CoolantFlow={flow_state}, "
             f"the system estimates Overheat={result['p_overheat']:.2f}. "
             f"Likely cause is {cause}. Recommended action: {proc} ({timeh:.0f}h, {cost:.0f}€, risk={risk})."
         )
@@ -158,7 +162,7 @@ def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=
     """
     Like run_demo, but CPDs are learned from telemetry CSV instead of manually defined.
     """
-    from .bn_model import discretize, learn_structure, fit_parameters, save_model, load_model
+    from .bn_model import discretize, learn_structure, fit_parameters, save_model, load_model, print_structure
     from sklearn.model_selection import train_test_split
     import os
 
@@ -172,6 +176,9 @@ def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=
         if debug:
             print(f"[Cache] Loading cached model from {model_cache_path}")
         model = load_model(model_cache_path)
+        
+        if debug:
+            print_structure(model)
         
         # If we need test data but model was cached, load and split data
         if return_test_data:
@@ -236,7 +243,7 @@ def evaluate_on_test_set(model, test_data, debug=False):
     Evaluate the model on all test samples and compute accuracy metrics.
     """
     from .bn_model import infer_overheat_prob
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
     
     cfg = load_cfg()
     sensor_cols = cfg["bn"]["sensors"]
@@ -265,6 +272,7 @@ def evaluate_on_test_set(model, test_data, debug=False):
     recall = recall_score(true_labels, predictions, zero_division=0)
     f1 = f1_score(true_labels, predictions, zero_division=0)
     cm = confusion_matrix(true_labels, predictions)
+    report = classification_report(true_labels, predictions, zero_division=0)
     
     print(f"\n=== [TEST SET EVALUATION RESULTS] ===")
     print(f"Accuracy:  {accuracy:.4f}")
@@ -277,12 +285,16 @@ def evaluate_on_test_set(model, test_data, debug=False):
     print(f"Actual 0   {cm[0][0]:6d} {cm[0][1]:6d}")
     print(f"Actual 1   {cm[1][0]:6d} {cm[1][1]:6d}")
     
+    print("\nClassification Report:")
+    print(report)
+    
     return {
         "accuracy": accuracy,
         "precision": precision,
         "recall": recall,
         "f1_score": f1,
         "confusion_matrix": cm,
+        "classification_report": report,
         "predictions": predictions,
         "true_labels": true_labels
     }

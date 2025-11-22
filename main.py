@@ -14,14 +14,44 @@ if __name__ == "__main__":
     if mode == "real":
         # For real mode, ask about retraining and evaluation
         force_retrain = input("Force re-training (ignore cached model)? (y/n): ").strip().lower() == "y"
-        evaluate = input("Evaluate on test set? (y/n): ").strip().lower() == "y"
         
-        if evaluate:
+        print("\nSelect mode:")
+        print("1. Single Example Diagnosis (Manual Input)")
+        print("2. Live Diagnosis (Random Faulty Sample)")
+        print("3. Evaluate on Test Set")
+        choice = input("Enter choice (1/2/3): ").strip()
+        
+        if choice == "3":
             # Get model and test data
             model, test_data = run_real(None, debug=debug, force_retrain=force_retrain, return_test_data=True)
             
             # Evaluate on test set
             results = evaluate_on_test_set(model, test_data, debug=debug)
+            
+        elif choice == "2":
+            # Live Diagnosis
+            model, test_data = run_real(None, debug=debug, force_retrain=force_retrain, return_test_data=True)
+            
+            # Filter for faulty samples (spindle_overheat=1) to make it interesting
+            faulty_samples = test_data[test_data["spindle_overheat"] == 1]
+            
+            if len(faulty_samples) > 0:
+                sample = faulty_samples.sample(1).iloc[0]
+                print("\n=== [LIVE DIAGNOSIS] ===")
+                print(f"Selected random faulty sample (Index: {sample.name})")
+                
+                # Extract evidence (only sensor columns)
+                from src.utils import load_cfg
+                cfg = load_cfg()
+                sensor_cols = cfg["bn"]["sensors"]
+                evidence = {col: int(sample[col]) for col in sensor_cols if col in test_data.columns}
+                print(f"Sensors: {evidence}")
+                
+                # Run diagnosis
+                run_real(evidence, debug=debug, force_retrain=False)
+            else:
+                print("No faulty samples found in test set.")
+                
         else:
             # Single example inference
             evidence = {

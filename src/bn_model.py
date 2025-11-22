@@ -211,3 +211,29 @@ def load_model(path: str) -> BayesianNetwork:
         model = pickle.load(f)
     print(f"[Model] Loaded from {path}")
     return model
+
+
+# ==============================================================
+# === Model Analysis
+# ==============================================================
+
+def print_structure(model: BayesianNetwork):
+    """Print the structure of the Bayesian Network."""
+    print("\n=== [BN STRUCTURE] ===")
+    print(f"Nodes: {len(model.nodes())}")
+    print(f"Edges: {len(model.edges())}")
+    
+    if hasattr(model, "latents"):
+        print(f"Latent Variables: {model.latents}")
+    
+    print("\nEdges:")
+    for u, v in model.edges():
+        print(f"  {u} -> {v}")
+
+
+def print_cpds(model: BayesianNetwork):
+    """Print the CPDs of the Bayesian Network."""
+    print("\n=== [BN PARAMETERS (CPDs)] ===")
+    for cpd in model.get_cpds():
+        print(f"\nCPD for {cpd.variable}:")
+        print(cpd)

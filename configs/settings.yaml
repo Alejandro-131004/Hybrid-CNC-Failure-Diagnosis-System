@@ -9,6 +9,11 @@ files:
   relations: "relations.csv"
 bn:
   discretize_bins: 4
+  max_iter: 10
+  # sample_size: 10000  # Comment this out to use all data
+  test_size: 0.2
+  model_cache_path: "models/trained_model.pkl"
+  n_jobs: -1
   sensors: ["spindle_temp","ambient_temp","vibration_rms","coolant_flow",
             "feed_rate","spindle_speed","load_pct","power_kw","tool_wear"]
 decision:

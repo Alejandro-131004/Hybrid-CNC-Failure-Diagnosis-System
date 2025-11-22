@@ -4,6 +4,8 @@ Hybrid Bayesian Network for CNC Diagnosis
 """
 
 import pandas as pd
+import pickle
+import os
 from sklearn.preprocessing import KBinsDiscretizer
 from pgmpy.estimators import HillClimbSearch, BicScore, MaximumLikelihoodEstimator, ExpectationMaximization
 from pgmpy.models import BayesianNetwork
@@ -152,12 +154,13 @@ def infer_overheat_prob(model, evidence: dict):
     return float(q.values[1])  # probability of the “failure” state
 
 
-def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: int = 50):
+def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: int = 50, n_jobs: int = 1):
     """
     Fit CPDs using the EM algorithm (supports latent variables and missing data).
     """
-    em = ExpectationMaximization(model)
-    em.fit(df_disc, max_iter=max_iter)
+    em = ExpectationMaximization(model, df_disc)
+    cpds = em.get_parameters(max_iter=max_iter, n_jobs=n_jobs)
+    model.add_cpds(*cpds)
     return model
 
 
@@ -183,6 +186,28 @@ def integrate_latent_causes(model: BayesianNetwork,
     for u, v in edges:
         if v in model.nodes() and (u, v) not in model.edges():
             model.add_edge(u, v)
+            
+    model.latents = set(latent)
     return model
 
 
+# ==============================================================
+# === Model persistence
+# ==============================================================
+
+def save_model(model: BayesianNetwork, path: str):
+    """Save a trained Bayesian Network model to disk using pickle."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'wb') as f:
+        pickle.dump(model, f)
+    print(f"[Model] Saved to {path}")
+
+
+def load_model(path: str) -> BayesianNetwork:
+    """Load a trained Bayesian Network model from disk."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Model file not found: {path}")
+    with open(path, 'rb') as f:
+        model = pickle.load(f)
+    print(f"[Model] Loaded from {path}")
+    return model

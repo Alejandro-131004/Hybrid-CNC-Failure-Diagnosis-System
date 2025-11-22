@@ -113,20 +113,29 @@ def run_demo(evidence: dict, debug=True, model_override=None):
     }
 
     # ===== NORMAL MODE OUTPUT =====
+    # ===== NORMAL MODE OUTPUT =====
     if not debug:
         cause = result["top_cause"]
         proc = result["procedures"][0] if result["procedures"] else "None"
 
-        # obtain cost/time of the procedure
-        dfp = pd.read_csv(path_for(cfg, "procedures"))
-        row = dfp[dfp["name"] == proc]
+        # Obter custos e tempos do procedimento
+        try:
+            dfp = pd.read_csv(path_for(cfg, "procedures"))
+            row = dfp[dfp["name"] == proc]
+            cost = float(row["spare_parts_cost_eur"].iloc[0]) if not row.empty else 0
+            timeh = float(row["effort_h"].iloc[0]) if not row.empty else 0
+            risk = int(row["risk_rating"].iloc[0]) if not row.empty else "unknown"
+        except Exception:
+            cost, timeh, risk = 0, 0, "unknown"
 
-        cost = float(row["spare_parts_cost_eur"].iloc[0]) if not row.empty else 0
-        timeh = float(row["effort_h"].iloc[0]) if not row.empty else 0
-        risk = int(row["risk_rating"].iloc[0]) if not row.empty else "unknown"
+        # --- CORREÇÃO DO ERRO KEYERROR ---
+        # Tenta ler o nome 'Demo' (Vibration), se falhar lê o nome 'Real' (vibration_rms)
+        # Isto resolve o crash que estava a ter.
+        vib_val = evidence.get("Vibration", evidence.get("vibration_rms", "N/A"))
+        flow_val = evidence.get("CoolantFlow", evidence.get("coolant_flow", "N/A"))
 
         print(
-            f"\nBecause Vibration={evidence['Vibration']} and CoolantFlow={evidence['CoolantFlow']}, "
+            f"\nBecause Vibration={vib_val} and CoolantFlow={flow_val}, "
             f"the system estimates Overheat={result['p_overheat']:.2f}. "
             f"Likely cause is {cause}. Recommended action: {proc} ({timeh:.0f}h, {cost:.0f}€, risk={risk})."
         )
@@ -145,36 +154,135 @@ def run_demo(evidence: dict, debug=True, model_override=None):
 
 
 
-def run_real(evidence: dict, debug=False):
+def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=False):
     """
     Like run_demo, but CPDs are learned from telemetry CSV instead of manually defined.
     """
-    from .bn_model import discretize, learn_structure, fit_parameters
+    from .bn_model import discretize, learn_structure, fit_parameters, save_model, load_model
+    from sklearn.model_selection import train_test_split
+    import os
 
     cfg = load_cfg()
-
-    # Load real telemetry + labels
-    tel = pd.read_csv(path_for(cfg, "telemetry"))
-    lab = pd.read_csv(path_for(cfg, "labels"))
-    df = tel.join(lab["spindle_overheat"])
-
-    # Discretize sensors
-    df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
-
     
-    # Learn BN structure based on real data
-    model = learn_structure(df_disc)
+    test_data = None  # Will store test data if needed
+    
+    # Check for cached model
+    model_cache_path = cfg["bn"].get("model_cache_path", "models/trained_model.pkl")
+    if not force_retrain and os.path.exists(model_cache_path):
+        if debug:
+            print(f"[Cache] Loading cached model from {model_cache_path}")
+        model = load_model(model_cache_path)
+        
+        # If we need test data but model was cached, load and split data
+        if return_test_data:
+            tel = pd.read_csv(path_for(cfg, "telemetry"))
+            lab = pd.read_csv(path_for(cfg, "labels"))
+            df = tel.join(lab["spindle_overheat"])
+            df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
+            test_size = cfg["bn"].get("test_size", 0.2)
+            _, test_data = train_test_split(df_disc, test_size=test_size, random_state=42)
+    else:
+        # Load real telemetry + labels
+        tel = pd.read_csv(path_for(cfg, "telemetry"))
+        lab = pd.read_csv(path_for(cfg, "labels"))
+        df = tel.join(lab["spindle_overheat"])
 
-    # Inject latent unobserved causes
-    model = integrate_latent_causes(
-        model,
-        vib_node="vibration_rms",
-        temp_node="spindle_temp",
-        flow_node="coolant_flow",
-    )
+        # Discretize sensors
+        df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
 
-    # Fit parameters using EM because latent causes have no direct labels
-    model = fit_parameters_em(model, df_disc, max_iter=50)
+        # Train-test split
+        test_size = cfg["bn"].get("test_size", 0.2)
+        df_train, test_data = train_test_split(df_disc, test_size=test_size, random_state=42)
+        
+        if debug:
+            print(f"[Split] Training set: {len(df_train)} samples, Test set: {len(test_data)} samples")
+        
+        # Downsample if configured
+        sample_size = cfg["bn"].get("sample_size", None)
+        if sample_size and len(df_train) > sample_size:
+            if debug:
+                print(f"[Optimization] Downsampling training data from {len(df_train)} to {sample_size} rows.")
+            df_train = df_train.sample(n=sample_size, random_state=42)
 
-    # Reuse the same reasoning pipeline with learned model
-    return run_demo(evidence, debug=debug, model_override=model)
+        # Learn BN structure based on real data
+        model = learn_structure(df_train)
+
+        # Inject latent unobserved causes
+        model = integrate_latent_causes(
+            model,
+            vib_node="vibration_rms",
+            temp_node="spindle_temp",
+            flow_node="coolant_flow",
+        )
+
+        # Fit parameters using EM because latent causes have no direct labels
+        max_iter = cfg["bn"].get("max_iter", 50)
+        n_jobs = cfg["bn"].get("n_jobs", 1)
+        model = fit_parameters_em(model, df_train, max_iter=max_iter, n_jobs=n_jobs)
+        
+        # Save the trained model
+        save_model(model, model_cache_path)
+
+    # Return based on what's requested
+    if return_test_data:
+        return model, test_data
+    else:
+        # Reuse the same reasoning pipeline with learned model
+        return run_demo(evidence, debug=debug, model_override=model)
+
+
+def evaluate_on_test_set(model, test_data, debug=False):
+    """
+    Evaluate the model on all test samples and compute accuracy metrics.
+    """
+    from .bn_model import infer_overheat_prob
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+    
+    cfg = load_cfg()
+    sensor_cols = cfg["bn"]["sensors"]
+    
+    predictions = []
+    true_labels = []
+    
+    print(f"\n[Evaluation] Testing on {len(test_data)} samples...")
+    
+    for idx, row in test_data.iterrows():
+        # Extract evidence (only sensor columns)
+        evidence = {col: int(row[col]) for col in sensor_cols if col in test_data.columns}
+        
+        # Get true label
+        true_label = int(row["spindle_overheat"])
+        true_labels.append(true_label)
+        
+        # Make prediction
+        prob_overheat = infer_overheat_prob(model, evidence)
+        predicted_label = 1 if prob_overheat >= 0.5 else 0
+        predictions.append(predicted_label)
+    
+    # Compute metrics
+    accuracy = accuracy_score(true_labels, predictions)
+    precision = precision_score(true_labels, predictions, zero_division=0)
+    recall = recall_score(true_labels, predictions, zero_division=0)
+    f1 = f1_score(true_labels, predictions, zero_division=0)
+    cm = confusion_matrix(true_labels, predictions)
+    
+    print(f"\n=== [TEST SET EVALUATION RESULTS] ===")
+    print(f"Accuracy:  {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"F1-Score:  {f1:.4f}")
+    print(f"\nConfusion Matrix:")
+    print(f"                Predicted")
+    print(f"                0      1")
+    print(f"Actual 0   {cm[0][0]:6d} {cm[0][1]:6d}")
+    print(f"Actual 1   {cm[1][0]:6d} {cm[1][1]:6d}")
+    
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1,
+        "confusion_matrix": cm,
+        "predictions": predictions,
+        "true_labels": true_labels
+    }

@@ -1,0 +1,6 @@
+component_id,name,parent_component,function
+C1,Spindle,,Rotate tool
+C2,CoolingSystem,,Dissipate heat
+C3,Fan,C2,Air flow
+C4,Filter,C2,Filter coolant/air
+C5,Bearing,C1,Support rotation

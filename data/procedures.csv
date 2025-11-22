@@ -1,0 +1,5 @@
+proc_id,name,targets_component,mitigates_cause,effort_h,spare_parts_cost_eur,risk_rating
+P1,ReplaceBearing,Bearing,BearingWearHigh,6.0,600,3
+P2,RepairFan,Fan,FanFault,2.0,150,2
+P3,CleanFilter,Filter,CloggedFilter,1.5,50,1
+P4,FlushCoolant,CoolingSystem,LowCoolingEfficiency,2.0,90,2

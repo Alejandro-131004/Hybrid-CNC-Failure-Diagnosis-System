@@ -1,0 +1,9 @@
+subj,pred,obj
+BearingWearHigh,causesSymptom,HighVibration
+BearingWearHigh,affectsComponent,Bearing
+FanFault,causesSymptom,HighSpindleTemp
+FanFault,affectsComponent,Fan
+CloggedFilter,causesSymptom,LowCoolantFlow
+CloggedFilter,affectsComponent,Filter
+LowCoolingEfficiency,causesSymptom,HighSpindleTemp
+LowCoolingEfficiency,affectsComponent,CoolingSystem

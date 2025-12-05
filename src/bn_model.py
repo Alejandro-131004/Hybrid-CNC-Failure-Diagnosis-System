@@ -5,16 +5,18 @@ Hybrid Bayesian Network for CNC Diagnosis
 
 import pandas as pd
 import pickle
+import numpy as np
 import os
 from sklearn.preprocessing import KBinsDiscretizer
 from pgmpy.estimators import HillClimbSearch, BicScore, MaximumLikelihoodEstimator, ExpectationMaximization
 from pgmpy.models import BayesianNetwork
 from pgmpy.inference import VariableElimination
 from pgmpy.factors.discrete import TabularCPD
-
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 TARGET = "spindle_overheat"  # from labels.csv
-
 
 # ==============================================================
 # === Data handling and discretization
@@ -26,12 +28,18 @@ def load_telemetry(telemetry_csv: str, labels_csv: str) -> pd.DataFrame:
     y = pd.read_csv(labels_csv)
     return X.join(y[TARGET])
 
-
-def discretize(df: pd.DataFrame, continuous_cols: list[str], n_bins: int = 4) -> pd.DataFrame:
-    """Discretize continuous variables into quantile-based bins."""
+def discretize(df: pd.DataFrame, continuous_cols: list[str], n_bins: int = 4, return_discretizer=False):
+    """
+    Discretizes continuous sensor columns using KBinsDiscretizer.
+    If return_discretizer=True, returns (df_discretized, discretizer).
+    """
     dfx = df.copy()
     enc = KBinsDiscretizer(n_bins=n_bins, encode="ordinal", strategy="quantile")
     dfx[continuous_cols] = enc.fit_transform(dfx[continuous_cols])
+
+    if return_discretizer:
+        return dfx, enc
+
     return dfx
 
 
@@ -137,58 +145,75 @@ def learn_from_cfg(cfg, telemetry_key="telemetry", labels_key="labels"):
     return model
 
 def infer_overheat_prob(model, evidence: dict):
+    """
+    Perform inference P(spindle_overheat = 1 | evidence).
+
+    Assumes that:
+      - The model was trained on discretized data (KBinsDiscretizer).
+      - The incoming evidence already uses the same discrete states
+        (i.e., integers 0, 1, 2, ... as in df_disc / test_data).
+    """
     infer = make_inferencer(model)
-    
-    # sanitizing the evidence (essential in REAL mode)
+
     ev = {}
     for k, v in (evidence or {}).items():
         if k in model.nodes():
-            card = model.get_cardinality(k)
-            if card == 2:
+            # evidence already in correct discrete space
+            try:
                 ev[k] = int(v)
-            else:
-                # binary mapping → largest bin in discretization
-                ev[k] = 0 if int(v) == 0 else card - 1
+            except Exception:
+                continue
 
     q = infer.query(variables=["spindle_overheat"], evidence=ev if ev else None)
-    return float(q.values[1])  # probability of the “failure” state
+    # state index 1 = "overheat = 1"
+    return float(q.values[1])
+
 
 
 def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: int = 50, n_jobs: int = 1):
     """
     Fit CPDs using the EM algorithm (supports latent variables and missing data).
     """
+    print(">> EM max_iter =", max_iter)
     em = ExpectationMaximization(model, df_disc)
     cpds = em.get_parameters(max_iter=max_iter, n_jobs=n_jobs)
     model.add_cpds(*cpds)
     return model
 
 
-def integrate_latent_causes(model: BayesianNetwork,
-                            vib_node="Vibration",
-                            temp_node="SpindleTemp",
-                            flow_node="CoolantFlow") -> BayesianNetwork:    
+def integrate_latent_causes(model: BayesianNetwork) -> BayesianNetwork:
     """
-    Integrates latent cause variables into the learned BN structure and adds
-    domain-driven causal edges between unobserved causes and observable sensors.
+    Add latent cause nodes to the BN and connect them causally to sensors.
+    This enforces a root-cause structure:
+        BearingWearHigh      → vibration_rms
+        FanFault             → spindle_temp
+        CloggedFilter        → coolant_flow
+        LowCoolingEfficiency → spindle_temp
     """
     latent = ["BearingWearHigh", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
+
+    # 1) Ensuring that latent nodes exist
     for c in latent:
         if c not in model.nodes():
             model.add_node(c)
 
-    edges = [
-        ("BearingWearHigh", vib_node),
-        ("FanFault",        temp_node),
-        ("CloggedFilter",   flow_node),
-        ("LowCoolingEfficiency", temp_node),
+    # 2) Add latent edges → sensor (if the sensor exists in the graph)
+    causal_edges = [
+        ("BearingWearHigh", "vibration_rms"),
+        ("FanFault", "spindle_temp"),
+        ("CloggedFilter", "coolant_flow"),
+        ("LowCoolingEfficiency", "spindle_temp"),
     ]
-    for u, v in edges:
+
+    for u, v in causal_edges:
         if v in model.nodes() and (u, v) not in model.edges():
             model.add_edge(u, v)
-            
+
+    # Mark latents
     model.latents = set(latent)
     return model
+
+
 
 
 # ==============================================================

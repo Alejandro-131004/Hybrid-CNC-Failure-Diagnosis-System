@@ -4,60 +4,137 @@ Implements Bayes Decision Theory for maintenance recommendations.
 """
 
 import pandas as pd
-from .utils import load_csv
 
 
+# ============================================================== 
+# === Helper: compute expected cost and risk over causes
 # ==============================================================
+
+def _compute_expected_cause_costs(cause_probs: dict[str, float] | None,
+                                  procedures_df: pd.DataFrame,
+                                  top_cause: str | None):
+    """
+    Aggregates, over all causes, the expected:
+      - spare parts cost
+      - risk severity
+    using the posterior probabilities of each cause.
+    If cause_probs is None, falls back to a degenerate distribution on top_cause.
+    """
+    if cause_probs is None or len(cause_probs) == 0:
+        cause_probs = {}
+        if top_cause is not None:
+            cause_probs[top_cause] = 1.0
+
+    expected_proc_cost = 0.0
+    expected_risk_severity = 0.0
+
+    # Safeguard: check expected column names
+    cost_col = "spare_parts_cost_eur"
+    risk_col = "risk_rating"
+
+    for cause, p_c in cause_probs.items():
+        if p_c <= 0:
+            continue
+
+        row = procedures_df[procedures_df["mitigates_cause"] == cause]
+        if row.empty:
+            continue
+
+        cost_c = float(row[cost_col].iloc[0])
+        risk_c = float(row[risk_col].iloc[0])
+
+        expected_proc_cost += p_c * cost_c
+        expected_risk_severity += p_c * risk_c
+
+    return expected_proc_cost, expected_risk_severity
+
+
+# ============================================================== 
 # === Expected cost computation (Bayes Decision Theory)
 # ==============================================================
 
-def expected_cost(action: str, p_overheat: float, proc_cost: float | None, cfg) -> float:
+def expected_cost(action: str,
+                  p_overheat: float,
+                  expected_proc_cost: float,
+                  expected_risk_severity: float,
+                  cfg) -> float:
     """
-    Computes expected cost of an action given the probability of overheat.
+    Computes expected cost of an action given:
+      - P(Overheat = 1 | evidence)
+      - distribution over causes mapped to:
+          * expected_proc_cost (from procedures.csv)
+          * expected_risk_severity (risk_rating, severity of failure)
     """
     rw = cfg["decision"]["risk_weight"]
     cost_params = cfg["decision"]["cost"]
 
+    # Base penalty factor (interpretable no relatório)
+    base_failure_penalty = 500.0
+
+    # Expected failure penalty weighted by cause severity
+    failure_penalty = base_failure_penalty * expected_risk_severity
+
     if action == "Continue":
-        penalty = 500  # assumed equipment damage if overheat occurs
-        return 0 + rw * p_overheat * penalty
+        # No immediate cost, but full failure risk
+        return cost_params.get("Continue", 0.0) + rw * p_overheat * failure_penalty
 
     if action == "SlowDown":
-        return cost_params["SlowDown_per_hour"] + rw * p_overheat * 200
+        # Operational cost + reduced failure risk (e.g. 50%)
+        slowdown_factor = 0.5
+        return (
+            cost_params["SlowDown_per_hour"]
+            + rw * p_overheat * failure_penalty * slowdown_factor
+        )
 
     if action == "ScheduleMaintenance":
-        base = cost_params["ScheduleMaintenance_base"]
-        return base + (proc_cost or 0) + rw * p_overheat * 50
+        # Immediate maintenance base cost + expected procedure cost
+        # + residual small failure risk (e.g. 10%)
+        residual_factor = 0.1
+        return (
+            cost_params["ScheduleMaintenance_base"]
+            + expected_proc_cost
+            + rw * p_overheat * failure_penalty * residual_factor
+        )
 
     raise ValueError(f"Unknown action: {action}")
 
 
-# ==============================================================
+# ============================================================== 
 # === Decision selection logic
 # ==============================================================
 
-def choose_action(p_overheat: float, top_cause: str | None, cfg, procedures_csv: str):
+def choose_action(p_overheat: float,
+                  top_cause: str | None,
+                  cfg,
+                  procedures_csv: str,
+                  cause_probs: dict[str, float] | None = None):
     """
     Chooses the optimal action minimizing expected cost:
       - Continue
       - SlowDown
       - ScheduleMaintenance
+
+    Now explicitly depends on the posterior distribution over causes:
+      P(cause | evidence) and their costs/risks from procedures.csv.
     """
-    proc_cost = None
     try:
         df = pd.read_csv(procedures_csv)
-        if top_cause and "mitigates_cause" in df.columns and "cost" in df.columns:
-            row = df[df["mitigates_cause"] == top_cause]
-            if not row.empty:
-                proc_cost = float(row["cost"].iloc[0])
     except Exception:
-        pass
+        # If we can't read procedures, fall back to generic values
+        df = pd.DataFrame(columns=["mitigates_cause", "spare_parts_cost_eur", "risk_rating"])
+
+    # Compute expectation over causes: cost and risk
+    expected_proc_cost, expected_risk_severity = _compute_expected_cause_costs(
+        cause_probs=cause_probs,
+        procedures_df=df,
+        top_cause=top_cause,
+    )
 
     # Compute expected cost for each possible action
     options = {
-        "Continue": expected_cost("Continue", p_overheat, proc_cost, cfg),
-        "SlowDown": expected_cost("SlowDown", p_overheat, proc_cost, cfg),
-        "ScheduleMaintenance": expected_cost("ScheduleMaintenance", p_overheat, proc_cost, cfg),
+        "Continue": expected_cost("Continue", p_overheat, expected_proc_cost, expected_risk_severity, cfg),
+        "SlowDown": expected_cost("SlowDown", p_overheat, expected_proc_cost, expected_risk_severity, cfg),
+        "ScheduleMaintenance": expected_cost("ScheduleMaintenance", p_overheat, expected_proc_cost, expected_risk_severity, cfg),
     }
 
     # Choose action with minimum expected cost

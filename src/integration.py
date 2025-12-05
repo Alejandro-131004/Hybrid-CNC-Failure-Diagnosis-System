@@ -1,7 +1,7 @@
 """
 integration.py
 Pipeline connecting Bayesian Network (BN) inference with Knowledge Graph (KG)
-and Decision Module for hybrid CNC fault diagnosis — with optional debug prints.
+and Decision Module for hybrid CNC fault diagnosis — corrected version.
 """
 
 from .utils import load_cfg, path_for
@@ -14,93 +14,116 @@ from .bn_model import (
 from .kg_module import CNCKG
 from .decision import choose_action
 import pandas as pd
-from .bn_model import integrate_latent_causes, fit_parameters_em
 
+from .evaluation import evaluate_bn
+from pgmpy.models import BayesianNetwork
+from pgmpy.factors.discrete import TabularCPD
+from .bn_model import fit_parameters_em, integrate_latent_causes, discretize
+
+###############################################################
+#  RUN DEMO (works for both manual and real models)
+###############################################################
 
 def run_demo(evidence: dict, debug=True, model_override=None):
-    """
-    Runs an integrated hybrid reasoning cycle:
-    1. Bayesian inference → Overheat probability and top cause
-    2. Knowledge Graph query → maintenance procedure(s)
-    3. Decision computation → optimal recommended action
-    """
-
-    # Load configuration
     cfg = load_cfg()
 
-    # Step 1: Initialize BN
+    # ------------------------------------------------------------
+    # MODEL SELECTION: MANUAL OR REAL
+    # ------------------------------------------------------------
     if model_override is None:
         model = build_manual_bn()
         model = add_manual_cpds(model)
+        if debug:
+            print("[BN] Using manually defined CPDs.")
     else:
         model = model_override
+        if debug:
+            print("[BN] Using REAL trained model for inference.")
 
-    if debug:
-        print("=== [STEP 1] BAYESIAN NETWORK INITIALIZATION ===")
-        print("[BN] Structure defined manually with causal relations and fixed CPDs.")
-
-    # Step 2: BN inference
+    # ------------------------------------------------------------
+    # STEP 2 — BAYESIAN INFERENCE
+    # ------------------------------------------------------------
     if debug:
         print("\n=== [STEP 2] BAYESIAN INFERENCE ===")
-        print(f"[Evidence] Provided sensor states: {evidence}")
+        # Note: 'evidence' here is the discrete evidence (0/1)
+        print(f"[Evidence] Provided (Discrete): {evidence}") 
 
+    # 1. Infer P(Overheat)
     p_overheat = infer_overheat_prob(model, evidence)
+
     if debug:
-        print(f"[Result] P(Overheat=1 | Evidence) = {p_overheat:.3f}")
+        print(f"→ P(Overheat=1 | evidence) = {p_overheat:.3f}")
 
     infer = make_inferencer(model)
 
+    # 2. Infer latent causes
     cause_nodes = ["BearingWearHigh", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
+    cause_sensor_map = {
+        "BearingWearHigh": ["vibration_rms"],
+        "FanFault": ["spindle_temp"],
+        "CloggedFilter": ["coolant_flow"],
+        "LowCoolingEfficiency": ["spindle_temp"],
+    }
     cause_probs = {}
+    top_cause = "UnknownCause"
+
+    if debug:
+        print("\n--- Inferring Latent Causes (Simplified Evidence) ---")
 
     for c in cause_nodes:
+        # Create minimal evidence dictionary for the specific cause query
+        minimal_evidence = {
+            s: evidence[s]
+            for s in cause_sensor_map.get(c, [])
+            if s in evidence
+        }
+
         try:
-            q = infer.query(variables=[c], evidence=evidence)
+            q = infer.query(variables=[c], evidence=minimal_evidence)
             cause_probs[c] = float(q.values[1])
+        except Exception as e:
             if debug:
-                print(f"[Cause] P({c}=1 | Evidence) = {cause_probs[c]:.3f}")
-        except Exception:
+                print(f"[ERROR] Inference failed for {c} with evidence {minimal_evidence}: {e}")
             cause_probs[c] = 0.0
 
-    top_cause = max(cause_probs, key=cause_probs.get) if cause_probs else None
-    if debug:
-        print(f"\n[BN] Top inferred root cause = {top_cause}")
-        print("[Explanation] Node with highest posterior probability given the evidence.")
+        if debug:
+            print(f"→ P({c}=1 | evidence) = {cause_probs[c]:.3f}")
 
-    # Step 3: Knowledge Graph reasoning
+    # Ensure top_cause is selected robustly
+    if cause_probs and any(p > 0.0 for p in cause_probs.values()):
+        top_cause = max(cause_probs, key=cause_probs.get)
+    elif cause_nodes:
+        # Fallback to the cause with the highest *prior* probability (BearingWearHigh is often chosen by default here)
+        top_cause = max(cause_nodes, key=lambda k: model.get_cpds(k).values[1] if model.get_cpds(k) else 0)
+
+    # ------------------------------------------------------------
+    # STEP 3 — KNOWLEDGE GRAPH QUERIES
+    # ------------------------------------------------------------
     if debug:
         print("\n=== [STEP 3] KNOWLEDGE GRAPH QUERIES ===")
 
     kg = CNCKG(debug=debug).load_from_cfg(cfg)
-    if top_cause:
-        procedures = kg.procedures_for_cause(top_cause)
-        components = kg.components_for_cause(top_cause)
-        symptoms = kg.symptoms_for_cause(top_cause)
-    else:
-        procedures, components, symptoms = [], [], []
 
-    if debug:
-        print(f"[KG] Found {len(procedures)} procedure(s), {len(components)} component(s), {len(symptoms)} symptom(s) for {top_cause}")
-        print(f"[KG] Procedures: {procedures or 'none'}")
-        print(f"[KG] Components: {components or 'none'}")
-        print(f"[KG] Symptoms: {symptoms or 'none'}")
+    symptoms = kg.symptoms_for_cause(top_cause)
+    components = kg.components_for_cause(top_cause)
+    procedures = kg.procedures_for_cause(top_cause)
 
-    # Step 4: Decision analysis
-    if debug:
-        print("\n=== [STEP 4] DECISION ANALYSIS (BAYES DECISION THEORY) ===")
-        print("[Formula] Expected cost = Action cost + RiskWeight × P(Overheat) × FailurePenalty")
-
+    # ------------------------------------------------------------
+    # STEP 4 — DECISION THEORY
+    # ------------------------------------------------------------
     procedures_csv = path_for(cfg, "procedures")
-    action, costs = choose_action(p_overheat, top_cause, cfg, procedures_csv)
 
-    if debug:
-        for act, val in costs.items():
-            print(f"[Decision] Expected cost({act}) = {val:.2f}")
+    action, costs = choose_action(
+        p_overheat=p_overheat,
+        top_cause=top_cause,
+        cfg=cfg,
+        procedures_csv=procedures_csv,
+        cause_probs=cause_probs
+    )
 
-        print(f"\n[Decision] Recommended action = {action}")
-        print("[Reason] Action minimizing expected operational risk and cost.")
-
-    # ===== Result Dictionary =====
+    # ------------------------------------------------------------
+    # RESULT
+    # ------------------------------------------------------------
     result = {
         "p_overheat": round(p_overheat, 3),
         "top_cause": top_cause,
@@ -112,189 +135,150 @@ def run_demo(evidence: dict, debug=True, model_override=None):
         "expected_costs": costs,
     }
 
-    # ===== NORMAL MODE OUTPUT =====
-    # ===== NORMAL MODE OUTPUT =====
+    # Pretty explanation when debug=False
     if not debug:
-        cause = result["top_cause"]
-        proc = result["procedures"][0] if result["procedures"] else "None"
+        vib = evidence.get("vibration_rms")
+        flow = evidence.get("coolant_flow")
 
-        # Obter custos e tempos do procedimento
-        try:
-            dfp = pd.read_csv(path_for(cfg, "procedures"))
-            row = dfp[dfp["name"] == proc]
-            cost = float(row["spare_parts_cost_eur"].iloc[0]) if not row.empty else 0
-            timeh = float(row["effort_h"].iloc[0]) if not row.empty else 0
-            risk = int(row["risk_rating"].iloc[0]) if not row.empty else "unknown"
-        except Exception:
-            cost, timeh, risk = 0, 0, "unknown"
+        vib_state = "high" if str(vib) == "1" else "normal"
+        flow_state = "low" if str(flow) == "1" else "normal"
 
-        # --- CORREÇÃO DO ERRO KEYERROR ---
-        # Tenta ler o nome 'Demo' (Vibration), se falhar lê o nome 'Real' (vibration_rms)
-        # Isto resolve o crash que estava a ter.
-        vib_val = evidence.get("Vibration", evidence.get("vibration_rms", "N/A"))
-        flow_val = evidence.get("CoolantFlow", evidence.get("coolant_flow", "N/A"))
+        proc = procedures[0] if procedures else "None"
+        dfp = pd.read_csv(path_for(cfg, "procedures"))
+        row = dfp[dfp["name"] == proc]
 
-        # Map binary values to readable states
-        vib_state = "High" if int(evidence.get("Vibration", evidence.get("vibration_rms", 0))) == 1 else "Normal"
-        flow_state = "Low" if int(evidence.get("CoolantFlow", evidence.get("coolant_flow", 0))) == 1 else "Normal"
-        
+        cost = float(row["spare_parts_cost_eur"].iloc[0]) if not row.empty else 0
+        timeh = float(row["effort_h"].iloc[0]) if not row.empty else 0
+        risk = int(row["risk_rating"].iloc[0]) if not row.empty else 0
+
         print(
-            f"\nBecause Vibration={vib_state} and CoolantFlow={flow_state}, "
+            f"\nBecause vibration is {vib_state} and coolant flow is {flow_state}, "
             f"the system estimates Overheat={result['p_overheat']:.2f}. "
-            f"Likely cause is {cause}. Recommended action: {proc} ({timeh:.0f}h, {cost:.0f}€, risk={risk})."
+            f"Likely cause is {top_cause}. "
+            f"Recommended action: {proc} ({timeh:.0f}h, {cost:.0f}€, risk={risk})."
         )
-
-        return result
-
-    # ===== DEBUG SUMMARY =====
-    if debug:
-        print("\n=== [SUMMARY] HYBRID REASONING RESULT ===")
-        for k, v in result.items():
-            print(f"{k}: {v}")
-
-        print("\n[Done] End of hybrid reasoning cycle.\n")
 
     return result
 
 
+###############################################################
+#  REAL MODE TRAINING WITH FIXED CAUSAL STRUCTURE + EM
+###############################################################
 
 def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=False):
-    """
-    Like run_demo, but CPDs are learned from telemetry CSV instead of manually defined.
-    """
-    from .bn_model import discretize, learn_structure, fit_parameters, save_model, load_model, print_structure
     from sklearn.model_selection import train_test_split
-    import os
+    import os, pickle
 
     cfg = load_cfg()
-    
-    test_data = None  # Will store test data if needed
-    
-    # Check for cached model
     model_cache_path = cfg["bn"].get("model_cache_path", "models/trained_model.pkl")
+
+    # ------------------------------------------------------------
+    # FAST PATH: Load already trained model
+    # ------------------------------------------------------------
     if not force_retrain and os.path.exists(model_cache_path):
+        model = pickle.load(open(model_cache_path, "rb"))
         if debug:
-            print(f"[Cache] Loading cached model from {model_cache_path}")
-        model = load_model(model_cache_path)
-        
-        if debug:
-            print_structure(model)
-        
-        # If we need test data but model was cached, load and split data
+            print("[BN] Loaded cached REAL model.")
+
+        # Load discretizer
+        discretizer = None
+        if os.path.exists("models/discretizer.pkl"):
+            # Correct opening and assignment
+            with open("models/discretizer.pkl", "rb") as f: 
+                discretizer = pickle.load(f)
+
+        # Return test set if requested
         if return_test_data:
             tel = pd.read_csv(path_for(cfg, "telemetry"))
             lab = pd.read_csv(path_for(cfg, "labels"))
             df = tel.join(lab["spindle_overheat"])
+
             df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
-            test_size = cfg["bn"].get("test_size", 0.2)
-            _, test_data = train_test_split(df_disc, test_size=test_size, random_state=42)
-    else:
-        # Load real telemetry + labels
-        tel = pd.read_csv(path_for(cfg, "telemetry"))
-        lab = pd.read_csv(path_for(cfg, "labels"))
-        df = tel.join(lab["spindle_overheat"])
+            _, test_data = train_test_split(
+                df_disc, test_size=cfg["bn"]["test_size"], random_state=42
+            )
+            return model, test_data
 
-        # Discretize sensors
-        df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
-
-        # Train-test split
-        test_size = cfg["bn"].get("test_size", 0.2)
-        df_train, test_data = train_test_split(df_disc, test_size=test_size, random_state=42)
-        
-        if debug:
-            print(f"[Split] Training set: {len(df_train)} samples, Test set: {len(test_data)} samples")
-        
-        # Downsample if configured
-        sample_size = cfg["bn"].get("sample_size", None)
-        if sample_size and len(df_train) > sample_size:
-            if debug:
-                print(f"[Optimization] Downsampling training data from {len(df_train)} to {sample_size} rows.")
-            df_train = df_train.sample(n=sample_size, random_state=42)
-
-        # Learn BN structure based on real data
-        model = learn_structure(df_train)
-
-        # Inject latent unobserved causes
-        model = integrate_latent_causes(
-            model,
-            vib_node="vibration_rms",
-            temp_node="spindle_temp",
-            flow_node="coolant_flow",
-        )
-
-        # Fit parameters using EM because latent causes have no direct labels
-        max_iter = cfg["bn"].get("max_iter", 50)
-        n_jobs = cfg["bn"].get("n_jobs", 1)
-        model = fit_parameters_em(model, df_train, max_iter=max_iter, n_jobs=n_jobs)
-        
-        # Save the trained model
-        save_model(model, model_cache_path)
-
-    # Return based on what's requested
-    if return_test_data:
-        return model, test_data
-    else:
-        # Reuse the same reasoning pipeline with learned model
         return run_demo(evidence, debug=debug, model_override=model)
 
+    # ------------------------------------------------------------
+    # SLOW PATH: FULL TRAINING
+    # ------------------------------------------------------------
+    if debug:
+        print("\n[BN] TRAINING REAL MODEL...\n")
 
-def evaluate_on_test_set(model, test_data, debug=False):
-    """
-    Evaluate the model on all test samples and compute accuracy metrics.
-    """
-    from .bn_model import infer_overheat_prob
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
-    
-    cfg = load_cfg()
-    sensor_cols = cfg["bn"]["sensors"]
-    
-    predictions = []
-    true_labels = []
-    
-    print(f"\n[Evaluation] Testing on {len(test_data)} samples...")
-    
-    for idx, row in test_data.iterrows():
-        # Extract evidence (only sensor columns)
-        evidence = {col: int(row[col]) for col in sensor_cols if col in test_data.columns}
-        
-        # Get true label
-        true_label = int(row["spindle_overheat"])
-        true_labels.append(true_label)
-        
-        # Make prediction
-        prob_overheat = infer_overheat_prob(model, evidence)
-        predicted_label = 1 if prob_overheat >= 0.5 else 0
-        predictions.append(predicted_label)
-    
-    # Compute metrics
-    accuracy = accuracy_score(true_labels, predictions)
-    precision = precision_score(true_labels, predictions, zero_division=0)
-    recall = recall_score(true_labels, predictions, zero_division=0)
-    f1 = f1_score(true_labels, predictions, zero_division=0)
-    cm = confusion_matrix(true_labels, predictions)
-    report = classification_report(true_labels, predictions, zero_division=0)
-    
-    print(f"\n=== [TEST SET EVALUATION RESULTS] ===")
-    print(f"Accuracy:  {accuracy:.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall:    {recall:.4f}")
-    print(f"F1-Score:  {f1:.4f}")
-    print(f"\nConfusion Matrix:")
-    print(f"                Predicted")
-    print(f"                0      1")
-    print(f"Actual 0   {cm[0][0]:6d} {cm[0][1]:6d}")
-    print(f"Actual 1   {cm[1][0]:6d} {cm[1][1]:6d}")
-    
-    print("\nClassification Report:")
-    print(report)
-    
-    return {
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1_score": f1,
-        "confusion_matrix": cm,
-        "classification_report": report,
-        "predictions": predictions,
-        "true_labels": true_labels
-    }
+    tel = pd.read_csv(path_for(cfg, "telemetry"))
+    lab = pd.read_csv(path_for(cfg, "labels"))
+    df = tel.join(lab["spindle_overheat"])
+
+    # Discretize + save discretizer
+    df_disc, discretizer = discretize(
+        df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"], return_discretizer=True
+    )
+
+    os.makedirs("models", exist_ok=True)
+    pickle.dump(discretizer, open("models/discretizer.pkl", "wb"))
+
+    # Split
+    df_train, df_test = train_test_split(
+        df_disc, test_size=cfg["bn"]["test_size"], random_state=42
+    )
+    if debug:
+        print(f"[Split] Train={len(df_train)}, Test={len(df_test)}")
+
+    # ------------------------------------------------------------
+    # FIXED, PHYSICALLY CORRECT STRUCTURE (matches DEMO + PDF)
+    # ------------------------------------------------------------
+    model = BayesianNetwork([
+        ('BearingWearHigh', 'vibration_rms'),
+        ('FanFault', 'spindle_temp'),
+        ('CloggedFilter', 'coolant_flow'),
+        ('LowCoolingEfficiency', 'spindle_temp'),
+        ('vibration_rms', 'spindle_overheat'),
+        ('spindle_temp', 'spindle_overheat'),
+        ('coolant_flow', 'spindle_overheat'),
+    ])
+
+    # Add latent cause logic
+    model = integrate_latent_causes(model)
+
+    # ------------------------------------------------------------
+    # INITIAL CPDs (neutral)
+    # ------------------------------------------------------------
+    initial_cpds = [
+        TabularCPD("BearingWearHigh", 2, [[0.5], [0.5]]),
+        TabularCPD("FanFault", 2, [[0.5], [0.5]]),
+        TabularCPD("CloggedFilter", 2, [[0.5], [0.5]]),
+        TabularCPD("LowCoolingEfficiency", 2, [[0.5], [0.5]]),
+    ]
+    for cpd in initial_cpds:
+        try:
+            model.add_cpds(cpd)
+        except:
+            pass
+
+    # ------------------------------------------------------------
+    # EM PARAMETER LEARNING
+    # ------------------------------------------------------------
+    if debug:
+        print("[BN] Learning CPDs with EM...")
+
+    model = fit_parameters_em(
+        model,
+        df_train,
+        max_iter=cfg["bn"]["max_iter"],
+        n_jobs=cfg["bn"]["n_jobs"],
+    )
+
+    model.check_model()
+
+    # Save model
+    pickle.dump(model, open(model_cache_path, "wb"))
+    if debug:
+        print("[BN] Model saved.")
+
+    if return_test_data:
+        return model, df_test
+
+    # Otherwise perform reasoning
+    return run_demo(evidence, debug=debug, model_override=model)

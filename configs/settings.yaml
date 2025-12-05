@@ -1,4 +1,5 @@
 data_dir: "data"
+
 files:
   telemetry: "telemetry.csv"
   labels: "labels.csv"
@@ -7,15 +8,26 @@ files:
   symptoms: "symptoms.csv"
   procedures: "procedures.csv"
   relations: "relations.csv"
+
 bn:
-  discretize_bins: 4
+  discretize_bins: 2
   max_iter: 10
-  # sample_size: 10000  # Comment this out to use all data
   test_size: 0.2
+  sample_size: null          # or remove
   model_cache_path: "models/trained_model.pkl"
   n_jobs: -1
-  sensors: ["spindle_temp","ambient_temp","vibration_rms","coolant_flow",
-            "feed_rate","spindle_speed","load_pct","power_kw","tool_wear"]
+  sensors: [
+    "spindle_temp",
+    "ambient_temp",
+    "vibration_rms",
+    "coolant_flow",
+    "feed_rate",
+    "spindle_speed",
+    "load_pct",
+    "power_kw",
+    "tool_wear"
+  ]
+
 decision:
   cost:
     Continue: 0

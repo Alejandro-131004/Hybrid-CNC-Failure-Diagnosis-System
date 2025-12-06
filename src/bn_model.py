@@ -28,13 +28,22 @@ def load_telemetry(telemetry_csv: str, labels_csv: str) -> pd.DataFrame:
     y = pd.read_csv(labels_csv)
     return X.join(y[TARGET])
 
+# src/bn_model.py
+
 def discretize(df: pd.DataFrame, continuous_cols: list[str], n_bins: int = 4, return_discretizer=False):
     """
     Discretizes continuous sensor columns using KBinsDiscretizer.
-    If return_discretizer=True, returns (df_discretized, discretizer).
+    Strategy: 'kmeans' (Best for separating distinct fault clusters from normal data).
     """
     dfx = df.copy()
-    enc = KBinsDiscretizer(n_bins=n_bins, encode="ordinal", strategy="quantile")
+    
+    # Ensure columns are numeric
+    for col in continuous_cols:
+        dfx[col] = pd.to_numeric(dfx[col], errors='coerce').fillna(0)
+
+    # USAR KMEANS: Melhora a separação de classes (Topicos 1 e 2)
+    enc = KBinsDiscretizer(n_bins=n_bins, encode="ordinal", strategy="kmeans")
+    
     dfx[continuous_cols] = enc.fit_transform(dfx[continuous_cols])
 
     if return_discretizer:
@@ -75,32 +84,32 @@ def make_inferencer(model: BayesianNetwork) -> VariableElimination:
 def build_manual_bn() -> BayesianNetwork:
     """Define the BN structure based on known physical and causal relations."""
     model = BayesianNetwork([
-        ('BearingWearHigh', 'Vibration'),
-        ('FanFault', 'SpindleTemp'),
-        ('CloggedFilter', 'CoolantFlow'),
-        ('LowCoolingEfficiency', 'SpindleTemp'),
-        ('Vibration', 'spindle_overheat'),
-        ('SpindleTemp', 'spindle_overheat'),
-        ('CoolantFlow', 'spindle_overheat')
-
+        # USING CSV NAMES (snake_case)
+        ('BearingWearHigh', 'vibration_rms'),
+        ('FanFault', 'spindle_temp'),
+        ('CloggedFilter', 'coolant_flow'),
+        ('LowCoolingEfficiency', 'spindle_temp'),
+        ('vibration_rms', 'spindle_overheat'),
+        ('spindle_temp', 'spindle_overheat'),
+        ('coolant_flow', 'spindle_overheat')
     ])
     return model
 
 
 def add_manual_cpds(model: BayesianNetwork) -> BayesianNetwork:
-    """Add pre-defined CPDs (domain-based)."""
+    """Add pre-defined CPDs (domain-based), using CSV names for nodes."""
     cpd_bearing = TabularCPD('BearingWearHigh', 2, [[0.9], [0.1]]) # Prior: 90% normal bearing, 10% worn (root node)
     cpd_fan = TabularCPD('FanFault', 2, [[0.95], [0.05]])
     cpd_filter = TabularCPD('CloggedFilter', 2, [[0.9], [0.1]])
     cpd_cooling = TabularCPD('LowCoolingEfficiency', 2, [[0.85], [0.15]])
 
     cpd_vibration = TabularCPD(
-        'Vibration', 2, [[0.95, 0.4], [0.05, 0.6]],
+        'vibration_rms', 2, [[0.95, 0.4], [0.05, 0.6]],
         evidence=['BearingWearHigh'], evidence_card=[2]
     )
 
     cpd_temp = TabularCPD(
-        'SpindleTemp', 2,
+        'spindle_temp', 2,
         [[0.96, 0.8, 0.7, 0.3],
          [0.04, 0.2, 0.3, 0.7]],
         evidence=['FanFault', 'LowCoolingEfficiency'],
@@ -108,7 +117,7 @@ def add_manual_cpds(model: BayesianNetwork) -> BayesianNetwork:
     )
 
     cpd_flow = TabularCPD(
-        'CoolantFlow', 2, [[0.9, 0.4], [0.1, 0.6]],
+        'coolant_flow', 2, [[0.9, 0.4], [0.1, 0.6]],
         evidence=['CloggedFilter'], evidence_card=[2]
     )
 
@@ -116,7 +125,7 @@ def add_manual_cpds(model: BayesianNetwork) -> BayesianNetwork:
         'spindle_overheat', 2,
         [[0.99, 0.9, 0.85, 0.3, 0.6, 0.2, 0.1, 0.01],
          [0.01, 0.1, 0.15, 0.7, 0.4, 0.8, 0.9, 0.99]],
-        evidence=['Vibration', 'SpindleTemp', 'CoolantFlow'],
+        evidence=['vibration_rms', 'spindle_temp', 'coolant_flow'],
         evidence_card=[2, 2, 2]
     )
 

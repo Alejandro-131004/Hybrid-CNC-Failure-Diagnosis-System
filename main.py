@@ -1,3 +1,4 @@
+# main.py
 """
 main.py
 Entry point for the Hybrid CNC Diagnosis System
@@ -10,9 +11,16 @@ from src.evaluation import evaluate_bn
 from src.config import load_cfg, path_for
 import numpy as np
 import pandas as pd
+import os
+
+# Global variables to store loaded items
+MODEL = None
+TEST_DATA = None
+DISCRETIZER = None
+CFG = None
 
 # ============================================================
-#  INPUT HELPERS
+# INPUT HELPERS
 # ============================================================
 
 def ask_demo_or_real():
@@ -53,11 +61,12 @@ def ask_mode():
 
 
 # ============================================================
-#  MAIN
+# MAIN
 # ============================================================
 
 def main():
-
+    global MODEL, TEST_DATA, DISCRETIZER, CFG
+    
     # MODE: DEMO or REAL
     mode = ask_demo_or_real()
 
@@ -73,25 +82,24 @@ def main():
     choice = ask_mode()
 
     # ============================================================
-    # DEMO MODE  (manual CPDs)
+    # DEMO MODE (manual CPDs)
     # ============================================================
     if mode == "demo":
-
         if choice == 1:
             print("\n[DEMO] Manual single example diagnosis.\n")
             evidence = {
-                "Vibration": int(input("Vibration (0/1): ")),
-                "SpindleTemp": int(input("SpindleTemp (0/1): ")),
-                "CoolantFlow": int(input("CoolantFlow (0/1): ")),
+                "vibration_rms": int(input("Vibration (0/1): ")),
+                "spindle_temp": int(input("SpindleTemp (0/1): ")),
+                "coolant_flow": int(input("CoolantFlow (0/1): ")),
             }
             run_demo(evidence, debug=debug)
 
         elif choice == 2:
             print("\n[DEMO] Live diagnosis (random simulated example).\n")
             evidence = {
-                "Vibration": random.randint(0, 1),
-                "SpindleTemp": random.randint(0, 1),
-                "CoolantFlow": random.randint(0, 1),
+                "vibration_rms": random.randint(0, 1),
+                "spindle_temp": random.randint(0, 1),
+                "coolant_flow": random.randint(0, 1),
             }
             print("[Random Evidence]:", evidence)
             run_demo(evidence, debug=debug)
@@ -99,29 +107,28 @@ def main():
         elif choice == 3:
             print("\n[DEMO] Evaluation is NOT available in manual mode.")
             print("Switch to REAL mode for full performance evaluation.\n")
-
-        return  # end DEMO mode
+        
+        return # End DEMO mode (Syntax FIX)
 
 
     # ============================================================
     # REAL MODE
     # ============================================================
 
-    # IMPORTANT: load/train the REAL model ONCE
-    model, test_data = run_real(
+    # Capture all 4 return values from run_real: model, test_data_disc, discretizer, cfg
+    MODEL, TEST_DATA, DISCRETIZER, CFG = run_real(
         evidence=None,
         debug=debug,
         force_retrain=force_retrain,
         return_test_data=True
     )
-
+    
     # ------------------------------------------------------------
     # MODE 1 — Manual Example
     # ------------------------------------------------------------
     if choice == 1:
         print("\n[REAL] Manual single example diagnosis.\n")
-        cfg = load_cfg()
-        sensors = cfg["bn"]["sensors"]
+        sensors = CFG["bn"]["sensors"]
 
         evidence = {}
         for s in sensors:
@@ -134,7 +141,7 @@ def main():
         result = run_demo(
             evidence=evidence,
             debug=debug,
-            model_override=model
+            model_override=MODEL
         )
 
         print("\n[REAL] Result:", result)
@@ -145,18 +152,26 @@ def main():
     elif choice == 2:
         print("[REAL] Live diagnosis (random test sample).")
 
-        cfg = load_cfg()
-        sensor_cols = cfg["bn"]["sensors"]
+        sensor_cols = CFG["bn"]["sensors"]
 
-        # Load RAW continuous dataset
-        tel = pd.read_csv(path_for(cfg, "telemetry"))
-        lab = pd.read_csv(path_for(cfg, "labels"))
+        # Load RAW continuous dataset (Only needed here for the pretty print)
+        tel = pd.read_csv(path_for(CFG, "telemetry"))
+        lab = pd.read_csv(path_for(CFG, "labels"))
         df_raw = tel.join(lab["spindle_overheat"])
 
-        # Pick SAME INDEX on discretized and raw data
-        idx = test_data.sample(1).index[0]
+        # [FIX] Filter for ACTUAL FAULTS to ensure the demo is interesting
+        # We look for rows in TEST_DATA where the target 'spindle_overheat' is 1
+        faulty_data = TEST_DATA[TEST_DATA['spindle_overheat'] == 1]
+        
+        # Se existirem falhas no conjunto de teste, escolhe uma delas.
+        # Caso contrário, escolhe aleatoriamente.
+        if not faulty_data.empty:
+            idx = faulty_data.sample(1).index[0]
+            # print(f"[INFO] Demo: Selected a known FAULTY sample (Index {idx}) to show detection capabilities.")
+        else:
+            idx = TEST_DATA.sample(1).index[0]
 
-        sample_disc = test_data.loc[idx]     # DISCRETE for BN inference
+        sample_disc = TEST_DATA.loc[idx]     # DISCRETE for BN inference
         sample_raw = df_raw.loc[idx]         # CONTINUOUS only for the display
 
         # Discrete evidence for BN:
@@ -173,8 +188,8 @@ def main():
         # Run full BN → KG → Decision pipeline
         result = run_demo(
             evidence=evidence,
-            debug=False,
-            model_override=model
+            debug=debug,
+            model_override=MODEL
         )
 
         print("\n[Live Diagnosis Result]")
@@ -185,7 +200,21 @@ def main():
     # ------------------------------------------------------------
     elif choice == 3:
         print("\n[REAL] Evaluating on full test set...\n")
-        evaluate_bn(model, test_data)
+        
+        # Ensure all necessary objects are passed to the evaluation function
+        metrics = evaluate_bn(
+            model=MODEL, 
+            test_data=TEST_DATA, 
+            discretizer=DISCRETIZER, 
+            cfg=CFG,
+            debug=debug
+        )
+        
+        # Confirmation print
+        if metrics:
+            print("\n--- Evaluation Complete ---")
+            # Assuming 'Summary' key holds the main metrics (F1, Recall, Precision)
+            print("Summary Metrics:", metrics.get('Summary', {}))
 
 
 if __name__ == "__main__":

@@ -175,110 +175,116 @@ def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=
     # ------------------------------------------------------------
     # FAST PATH: Load already trained model
     # ------------------------------------------------------------
+    model = None
+    discretizer = None
+    df_test = None
+    
     if not force_retrain and os.path.exists(model_cache_path):
-        model = pickle.load(open(model_cache_path, "rb"))
-        if debug:
-            print("[BN] Loaded cached REAL model.")
-
-        # Load discretizer
-        discretizer = None
-        if os.path.exists("models/discretizer.pkl"):
-            # Correct opening and assignment
-            with open("models/discretizer.pkl", "rb") as f: 
-                discretizer = pickle.load(f)
-
-        # Return test set if requested
-        if return_test_data:
-            tel = pd.read_csv(path_for(cfg, "telemetry"))
-            lab = pd.read_csv(path_for(cfg, "labels"))
-            df = tel.join(lab["spindle_overheat"])
-
-            df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
-            _, test_data = train_test_split(
-                df_disc, test_size=cfg["bn"]["test_size"], random_state=42
-            )
-            return model, test_data
-
-        return run_demo(evidence, debug=debug, model_override=model)
-
-    # ------------------------------------------------------------
-    # SLOW PATH: FULL TRAINING
-    # ------------------------------------------------------------
-    if debug:
-        print("\n[BN] TRAINING REAL MODEL...\n")
-
-    tel = pd.read_csv(path_for(cfg, "telemetry"))
-    lab = pd.read_csv(path_for(cfg, "labels"))
-    df = tel.join(lab["spindle_overheat"])
-
-    # Discretize + save discretizer
-    df_disc, discretizer = discretize(
-        df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"], return_discretizer=True
-    )
-
-    os.makedirs("models", exist_ok=True)
-    pickle.dump(discretizer, open("models/discretizer.pkl", "wb"))
-
-    # Split
-    df_train, df_test = train_test_split(
-        df_disc, test_size=cfg["bn"]["test_size"], random_state=42
-    )
-    if debug:
-        print(f"[Split] Train={len(df_train)}, Test={len(df_test)}")
-
-    # ------------------------------------------------------------
-    # FIXED, PHYSICALLY CORRECT STRUCTURE (matches DEMO + PDF)
-    # ------------------------------------------------------------
-    model = BayesianNetwork([
-        ('BearingWearHigh', 'vibration_rms'),
-        ('FanFault', 'spindle_temp'),
-        ('CloggedFilter', 'coolant_flow'),
-        ('LowCoolingEfficiency', 'spindle_temp'),
-        ('vibration_rms', 'spindle_overheat'),
-        ('spindle_temp', 'spindle_overheat'),
-        ('coolant_flow', 'spindle_overheat'),
-    ])
-
-    # Add latent cause logic
-    model = integrate_latent_causes(model)
-
-    # ------------------------------------------------------------
-    # INITIAL CPDs (neutral)
-    # ------------------------------------------------------------
-    initial_cpds = [
-        TabularCPD("BearingWearHigh", 2, [[0.5], [0.5]]),
-        TabularCPD("FanFault", 2, [[0.5], [0.5]]),
-        TabularCPD("CloggedFilter", 2, [[0.5], [0.5]]),
-        TabularCPD("LowCoolingEfficiency", 2, [[0.5], [0.5]]),
-    ]
-    for cpd in initial_cpds:
         try:
-            model.add_cpds(cpd)
-        except:
-            pass
+            with open(model_cache_path, "rb") as f:
+                model = pickle.load(f)
+            
+            # Load discretizer
+            if os.path.exists("models/discretizer.pkl"):
+                with open("models/discretizer.pkl", "rb") as f:
+                    discretizer = pickle.load(f)
+            
+            if debug:
+                print("[BN] Loaded cached REAL model and Discretizer.")
+
+            # Load and split data for test_data return
+            if return_test_data:
+                tel = pd.read_csv(path_for(cfg, "telemetry"))
+                lab = pd.read_csv(path_for(cfg, "labels"))
+                df = tel.join(lab["spindle_overheat"])
+
+                df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
+                _, df_test = train_test_split(
+                    df_disc, test_size=cfg["bn"]["test_size"], random_state=42
+                )
+            
+            if return_test_data:
+                # FIX 1: Ensure all four required objects are returned
+                return model, df_test, discretizer, cfg
+
+        except Exception as e:
+            if debug:
+                 print(f"[BN] Error loading cache ({e}). Forcing retraining.")
+            force_retrain = True
+
 
     # ------------------------------------------------------------
-    # EM PARAMETER LEARNING
+    # SLOW PATH: FULL TRAINING (If forced_retrain=True or cache failed)
     # ------------------------------------------------------------
-    if debug:
-        print("[BN] Learning CPDs with EM...")
+    if model is None:
+        if debug:
+            print("\n[BN] TRAINING REAL MODEL...\n")
 
-    model = fit_parameters_em(
-        model,
-        df_train,
-        max_iter=cfg["bn"]["max_iter"],
-        n_jobs=cfg["bn"]["n_jobs"],
-    )
+        tel = pd.read_csv(path_for(cfg, "telemetry"))
+        lab = pd.read_csv(path_for(cfg, "labels"))
+        df = tel.join(lab["spindle_overheat"])
 
-    model.check_model()
+        # Discretize + save discretizer
+        df_disc, discretizer = discretize(
+            df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"], return_discretizer=True
+        )
 
-    # Save model
-    pickle.dump(model, open(model_cache_path, "wb"))
-    if debug:
-        print("[BN] Model saved.")
+        os.makedirs("models", exist_ok=True)
+        pickle.dump(discretizer, open("models/discretizer.pkl", "wb"))
 
+        # Split
+        df_train, df_test = train_test_split(
+            df_disc, test_size=cfg["bn"]["test_size"], random_state=42
+        )
+        if debug:
+            print(f"[Split] Train={len(df_train)}, Test={len(df_test)}")
+
+        # FIXED, PHYSICALLY CORRECT STRUCTURE
+        model = BayesianNetwork([
+            ('BearingWearHigh', 'vibration_rms'),
+            ('FanFault', 'spindle_temp'),
+            ('CloggedFilter', 'coolant_flow'),
+            ('LowCoolingEfficiency', 'spindle_temp'),
+            ('vibration_rms', 'spindle_overheat'),
+            ('spindle_temp', 'spindle_overheat'),
+            ('coolant_flow', 'spindle_overheat'),
+        ])
+
+        model = integrate_latent_causes(model)
+
+        # INITIAL CPDs (neutral)
+        initial_cpds = [
+            TabularCPD("BearingWearHigh", 2, [[0.5], [0.5]]),
+            TabularCPD("FanFault", 2, [[0.5], [0.5]]),
+            TabularCPD("CloggedFilter", 2, [[0.5], [0.5]]),
+            TabularCPD("LowCoolingEfficiency", 2, [[0.5], [0.5]]),
+        ]
+        for cpd in initial_cpds:
+            try: model.add_cpds(cpd)
+            except: pass
+
+        # EM PARAMETER LEARNING
+        if debug:
+            print("[BN] Learning CPDs with EM...")
+        
+        model = fit_parameters_em(
+            model,
+            df_train,
+            max_iter=cfg["bn"]["max_iter"],
+            n_jobs=cfg["bn"]["n_jobs"],
+        )
+
+        model.check_model()
+
+        # Save model
+        pickle.dump(model, open(model_cache_path, "wb"))
+        if debug:
+            print("[BN] Model saved.")
+    
+    
     if return_test_data:
-        return model, df_test
+        # FIX 2: Ensure all four required objects are returned after training
+        return model, df_test, discretizer, cfg
 
     # Otherwise perform reasoning
     return run_demo(evidence, debug=debug, model_override=model)

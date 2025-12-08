@@ -141,7 +141,8 @@ def main():
         result = run_demo(
             evidence=evidence,
             debug=debug,
-            model_override=MODEL
+            model_override=MODEL,
+            discretizer=DISCRETIZER
         )
 
         print("\n[REAL] Result:", result)
@@ -189,7 +190,8 @@ def main():
         result = run_demo(
             evidence=evidence,
             debug=debug,
-            model_override=MODEL
+            model_override=MODEL,
+            discretizer=DISCRETIZER
         )
 
         print("\n[Live Diagnosis Result]")

@@ -24,7 +24,7 @@ from .bn_model import fit_parameters_em, integrate_latent_causes, discretize
 #  RUN DEMO (works for both manual and real models)
 ###############################################################
 
-def run_demo(evidence: dict, debug=True, model_override=None):
+def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
     cfg = load_cfg()
 
     # ------------------------------------------------------------
@@ -43,6 +43,65 @@ def run_demo(evidence: dict, debug=True, model_override=None):
     # ------------------------------------------------------------
     # STEP 2 — BAYESIAN INFERENCE
     # ------------------------------------------------------------
+    
+    # [FIX] Handle Raw Inputs (Floats) -> Discrete Bins (Ints)
+    # If a discretizer is provided and values look raw (floats), transform them.
+    # We check if any value is a float, or if the values are outside strict bin indices (less robust but works).
+    if discretizer and evidence:
+        # Check if we need to discretize (heuristic: float type or value > max_bin if known, but float is safer)
+        # Actually, simpler: just try to discretize if the key exists in config sensors.
+        sensor_cols = cfg["bn"]["sensors"]
+        
+        # Prepare a mini-dataframe for valid sensors
+        valid_keys = [k for k in evidence if k in sensor_cols]
+        if valid_keys:
+            # Check if any value is float (raw)
+            is_raw = any(isinstance(evidence[k], float) for k in valid_keys)
+            
+            # Or if user passed integers but they are outside 0..n_bins-1? 
+            # (Users might type "45" which is int but meant to be temp).
+            # Heuristic: If value > number of bins, it's definitely raw.
+            # n_bins = cfg['bn']['discretize_bins']
+            # But let's rely on type or value magnitude, or just force discretization if provided?
+            # Safer: Try to create a DataFrame and transform.
+            
+            # Construct DataFrame with 0s for missing columns (required by discretizer transform usually)
+            # Actually, we can just pass the available columns if we wrap carefully?
+            # KBinsDiscretizer expects 2D array with shape (n_samples, n_features).
+            # It expects ALL features it was trained on.
+            
+            try:
+                # We need to construct a full row to use the discretizer properly
+                # because KBinsDiscretizer works on the full feature set positionally.
+                full_row = pd.DataFrame(0.0, index=[0], columns=sensor_cols)
+                
+                # Fill in our evidence
+                has_raw_input = False
+                for k in valid_keys:
+                    val = evidence[k]
+                    full_row[k] = float(val)
+                    if isinstance(val, (float, int)) and (val > 10 or isinstance(val, float)): 
+                         # Weak heuristic: if val > 10 (likely temp/speed) it's valid raw.
+                         # If val is 0, 1, 2, 3 it might be ambiguity.
+                         has_raw_input = True
+
+                # If we detected potential raw input, let's transform
+                if has_raw_input:
+                    # Transform
+                    full_row_disc = discretizer.transform(full_row)[0] # Array of ints
+                    
+                    # Update evidence with discretized values
+                    for idx, col in enumerate(sensor_cols):
+                        if col in evidence:
+                            evidence[col] = int(full_row_disc[idx])
+                            
+                    if debug:
+                        print(f"[BN] Discretized raw inputs to: {evidence}")
+
+            except Exception as e:
+                if debug:
+                    print(f"[BN] Warning: Failed to auto-discretize inputs: {e}")
+
     if debug:
         print("\n=== [STEP 2] BAYESIAN INFERENCE ===")
         # Note: 'evidence' here is the discrete evidence (0/1)

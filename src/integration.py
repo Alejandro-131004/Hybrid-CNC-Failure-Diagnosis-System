@@ -47,6 +47,9 @@ def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
     # [FIX] Handle Raw Inputs (Floats) -> Discrete Bins (Ints)
     # If a discretizer is provided and values look raw (floats), transform them.
     # We check if any value is a float, or if the values are outside strict bin indices (less robust but works).
+    if debug:
+        print(f"[DEBUG] run_demo called. Discretizer present: {discretizer is not None}")
+        
     if discretizer and evidence:
         # Check if we need to discretize (heuristic: float type or value > max_bin if known, but float is safer)
         # Actually, simpler: just try to discretize if the key exists in config sensors.
@@ -56,8 +59,23 @@ def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
         valid_keys = [k for k in evidence if k in sensor_cols]
         if valid_keys:
             # Check if any value is float (raw)
-            is_raw = any(isinstance(evidence[k], float) for k in valid_keys)
+            # FORCE discretization if ANY value is float OR > 3 (assuming max bin is relatively small)
+            # This covers the case where int(111) is passed via Slider (some sliders might return int for big numbers?)
+            # IntSlider sends ints. FloatSlider sends floats.
             
+            is_raw = False
+            for k in valid_keys:
+                val = evidence[k]
+                if isinstance(val, float):
+                    is_raw = True
+                    break
+                if isinstance(val, int) and val > 5: # Valid bins are 0,1,2,3. Any int > 5 is definitely RAW.
+                    is_raw = True
+                    break
+            
+            if debug:
+                print(f"[DEBUG] Evidence contains raw inputs? {is_raw}")
+
             # Or if user passed integers but they are outside 0..n_bins-1? 
             # (Users might type "45" which is int but meant to be temp).
             # Heuristic: If value > number of bins, it's definitely raw.
@@ -76,17 +94,13 @@ def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
                 full_row = pd.DataFrame(0.0, index=[0], columns=sensor_cols)
                 
                 # Fill in our evidence
-                has_raw_input = False
                 for k in valid_keys:
-                    val = evidence[k]
-                    full_row[k] = float(val)
-                    if isinstance(val, (float, int)) and (val > 10 or isinstance(val, float)): 
-                         # Weak heuristic: if val > 10 (likely temp/speed) it's valid raw.
-                         # If val is 0, 1, 2, 3 it might be ambiguity.
-                         has_raw_input = True
+                    full_row[k] = float(evidence[k]) # Ensure float for transform
 
                 # If we detected potential raw input, let's transform
-                if has_raw_input:
+                if is_raw:
+                    if debug:
+                        print("[DEBUG] Attempting discretization...")
                     # Transform
                     full_row_disc = discretizer.transform(full_row)[0] # Array of ints
                     
@@ -99,8 +113,8 @@ def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
                         print(f"[BN] Discretized raw inputs to: {evidence}")
 
             except Exception as e:
-                if debug:
-                    print(f"[BN] Warning: Failed to auto-discretize inputs: {e}")
+                # if debug:
+                print(f"[BN] Warning: Failed to auto-discretize inputs: {e}")
 
     if debug:
         print("\n=== [STEP 2] BAYESIAN INFERENCE ===")
@@ -346,4 +360,4 @@ def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=
         return model, df_test, discretizer, cfg
 
     # Otherwise perform reasoning
-    return run_demo(evidence, debug=debug, model_override=model)
+    return run_demo(evidence, debug=debug, model_override=model, discretizer=discretizer)

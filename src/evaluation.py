@@ -72,12 +72,25 @@ def evaluate_bn(model, test_data, discretizer=None, cfg=None, save_dir="results/
     f1 = f1_score(y_true, y_pred, zero_division=0, pos_label=1)
     brier = brier_score_loss(y_true, y_prob)
     
-    cm = confusion_matrix(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     
-    # Get report as dict for JSON saving and string for printing
-    report_dict = classification_report(y_true, y_pred, target_names=['Normal (0)', 'Overheat (1)'], zero_division=0, output_dict=True)
-    report_text = classification_report(y_true, y_pred, target_names=['Normal (0)', 'Overheat (1)'], zero_division=0)
-
+   # --- CORRECTION HERE ---
+    # We added labels=[0, 1] to force the report to consider both classes
+    # even if one of them does not appear in the predictions or the test.
+    report_dict = classification_report(
+        y_true, y_pred, 
+        labels=[0, 1],  # <--- IMPORTANTE
+        target_names=['Normal (0)', 'Overheat (1)'], 
+        zero_division=0, 
+        output_dict=True
+    )
+    
+    report_text = classification_report(
+        y_true, y_pred, 
+        labels=[0, 1],  # <--- IMPORTANTE
+        target_names=['Normal (0)', 'Overheat (1)'], 
+        zero_division=0
+    )
     # ------------------------------------------------------
     # 5. CONSOLE OUTPUT
     # ------------------------------------------------------
@@ -162,3 +175,100 @@ def evaluate_bn(model, test_data, discretizer=None, cfg=None, save_dir="results/
     print("="*45 + "\n")
 
     return {'Summary': results}
+
+
+def evaluate_root_causes(model, test_data, debug=False):
+    """
+    Evaluates root-cause diagnosis accuracy.
+    Only considers samples with a VALID ground-truth cause.
+    """
+
+    from pgmpy.inference import VariableElimination
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+    import pandas as pd
+
+    print("\n" + "=" * 45)
+    print("   ROOT CAUSE DIAGNOSIS EVALUATION")
+    print("=" * 45)
+
+    # --------------------------------------------------
+    # 1. Sanity checks
+    # --------------------------------------------------
+    if "actual_cause" not in test_data.columns:
+        print("[ERROR] 'actual_cause' column missing.")
+        return
+
+    # Keep ONLY valid causes
+    valid_causes = [
+        "BearingWearHigh",
+        "FanFault",
+        "CloggedFilter",
+        "LowCoolingEfficiency"
+    ]
+
+    fault_data = test_data[
+        test_data["actual_cause"].isin(valid_causes)
+    ].copy()
+
+    if fault_data.empty:
+        print("[WARNING] No valid faulty samples for root cause evaluation.")
+        return
+
+    if debug:
+        print("[INFO] Samples with valid causes:")
+        print(fault_data["actual_cause"].value_counts())
+
+    # --------------------------------------------------
+    # 2. Inference
+    # --------------------------------------------------
+    infer = VariableElimination(model)
+    y_true = []
+    y_pred = []
+
+    for _, row in fault_data.iterrows():
+        # Evidence = sensors only
+        evidence = {
+            col: int(row[col])
+            for col in row.index
+            if col in model.nodes()
+            and col not in valid_causes
+            and col not in ["actual_cause", "spindle_overheat"]
+        }
+
+        best_cause = "Unknown"
+        max_prob = -1.0
+
+        for c in valid_causes:
+            if c not in model.nodes():
+                continue
+
+            try:
+                q = infer.query(variables=[c], evidence=evidence)
+                prob = float(q.values[1]) if len(q.values) > 1 else 0.0
+            except Exception:
+                prob = 0.0
+
+            if prob > max_prob:
+                max_prob = prob
+                best_cause = c
+
+        y_true.append(row["actual_cause"])
+        y_pred.append(best_cause)
+
+    # --------------------------------------------------
+    # 3. Metrics
+    # --------------------------------------------------
+    acc = accuracy_score(y_true, y_pred)
+
+    print(f"\nDiagnosis Accuracy (valid faulty samples): {acc:.4f}")
+
+    print("\n--- Classification Report ---")
+    print(classification_report(y_true, y_pred, zero_division=0))
+
+    print("\n--- Confusion Matrix ---")
+    labels = sorted(set(y_true) | set(y_pred))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    cm_df = pd.DataFrame(cm, index=labels, columns=labels)
+    print(cm_df)
+
+    return acc

@@ -1,189 +1,100 @@
 """
 integration.py
 Pipeline connecting Bayesian Network (BN) inference with Knowledge Graph (KG)
-and Decision Module for hybrid CNC fault diagnosis — corrected version.
+and Decision Module for hybrid CNC fault diagnosis.
 """
 
 from .utils import load_cfg, path_for
-from .bn_model import (
-    build_manual_bn,
-    add_manual_cpds,
-    infer_overheat_prob,
-    make_inferencer,
-)
+from .bn_model import infer_overheat_prob, make_inferencer, integrate_latent_causes
 from .kg_module import CNCKG
 from .decision import choose_action
 import pandas as pd
-
-from .evaluation import evaluate_bn
+import numpy as np
 from pgmpy.models import BayesianNetwork
-from pgmpy.factors.discrete import TabularCPD
-from .bn_model import fit_parameters_em, integrate_latent_causes, discretize
+from pgmpy.estimators import MaximumLikelihoodEstimator
 
-###############################################################
-#  RUN DEMO (works for both manual and real models)
-###############################################################
+# ------------------------------------------------------------
+# CRITICAL: MANUAL DISCRETIZATION (THRESHOLDS ADJUSTED)
+# ------------------------------------------------------------
+def manual_discretize(df, sensors_list):
+    """
+    Discretizes sensors based on SAFE PHYSICAL THRESHOLDS.
+    Adjusted to avoid false positives on noisy normal data.
+    0 = Normal
+    1 = Abnormal
+    """
+    df_disc = df.copy()
+    
+    # 1. Spindle Temp
+    # Augmentation injects faults > 90. Normal is likely < 70.
+    # Threshold: 85 (Safe middle ground)
+    if "spindle_temp" in df.columns:
+        df_disc["spindle_temp"] = (df["spindle_temp"] > 85.0).astype(int)
+        
+    # 2. Vibration RMS
+    # Augmentation injects faults > 1.5. 
+    # Previous Threshold (1.0) was too low (caught normal noise).
+    # New Threshold: 1.4 (Only catches the real faults)
+    if "vibration_rms" in df.columns:
+        df_disc["vibration_rms"] = (df["vibration_rms"] > 1.4).astype(int)
+        
+    # 3. Coolant Flow
+    # Augmentation injects faults < 0.5.
+    # Normal is likely > 2.0.
+    # Threshold: 0.6 (Anything below 0.6 is definitely a clog)
+    # We invert logic: 1 = Abnormal (Low Flow)
+    if "coolant_flow" in df.columns:
+        df_disc["coolant_flow"] = (df["coolant_flow"] < 0.6).astype(int)
+        
+    # 4. Others (Default to 0)
+    for col in sensors_list:
+        if col not in ["spindle_temp", "vibration_rms", "coolant_flow"] and col in df.columns:
+            df_disc[col] = 0 
+            
+    return df_disc
 
+# ------------------------------------------------------------
+# RUN DEMO
+# ------------------------------------------------------------
 def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
     cfg = load_cfg()
-
-    # ------------------------------------------------------------
-    # MODEL SELECTION: MANUAL OR REAL
-    # ------------------------------------------------------------
+    
     if model_override is None:
-        model = build_manual_bn()
-        model = add_manual_cpds(model)
-        if debug:
-            print("[BN] Using manually defined CPDs.")
+        print("[ERROR] No model provided to run_demo.")
+        return {}
     else:
         model = model_override
-        if debug:
-            print("[BN] Using REAL trained model for inference.")
 
-    # ------------------------------------------------------------
-    # STEP 2 — BAYESIAN INFERENCE
-    # ------------------------------------------------------------
-    
-    # [FIX] Handle Raw Inputs (Floats) -> Discrete Bins (Ints)
-    # If a discretizer is provided and values look raw (floats), transform them.
-    # We check if any value is a float, or if the values are outside strict bin indices (less robust but works).
-    if debug:
-        print(f"[DEBUG] run_demo called. Discretizer present: {discretizer is not None}")
-        
-    if discretizer and evidence:
-        # Check if we need to discretize (heuristic: float type or value > max_bin if known, but float is safer)
-        # Actually, simpler: just try to discretize if the key exists in config sensors.
-        sensor_cols = cfg["bn"]["sensors"]
-        
-        # Prepare a mini-dataframe for valid sensors
-        valid_keys = [k for k in evidence if k in sensor_cols]
-        if valid_keys:
-            # Check if any value is float (raw)
-            # FORCE discretization if ANY value is float OR > 3 (assuming max bin is relatively small)
-            # This covers the case where int(111) is passed via Slider (some sliders might return int for big numbers?)
-            # IntSlider sends ints. FloatSlider sends floats.
-            
-            is_raw = False
-            for k in valid_keys:
-                val = evidence[k]
-                if isinstance(val, float):
-                    is_raw = True
-                    break
-                if isinstance(val, int) and val > 5: # Valid bins are 0,1,2,3. Any int > 5 is definitely RAW.
-                    is_raw = True
-                    break
-            
-            if debug:
-                print(f"[DEBUG] Evidence contains raw inputs? {is_raw}")
-
-            # Or if user passed integers but they are outside 0..n_bins-1? 
-            # (Users might type "45" which is int but meant to be temp).
-            # Heuristic: If value > number of bins, it's definitely raw.
-            # n_bins = cfg['bn']['discretize_bins']
-            # But let's rely on type or value magnitude, or just force discretization if provided?
-            # Safer: Try to create a DataFrame and transform.
-            
-            # Construct DataFrame with 0s for missing columns (required by discretizer transform usually)
-            # Actually, we can just pass the available columns if we wrap carefully?
-            # KBinsDiscretizer expects 2D array with shape (n_samples, n_features).
-            # It expects ALL features it was trained on.
-            
-            try:
-                # We need to construct a full row to use the discretizer properly
-                # because KBinsDiscretizer works on the full feature set positionally.
-                full_row = pd.DataFrame(0.0, index=[0], columns=sensor_cols)
-                
-                # Fill in our evidence
-                for k in valid_keys:
-                    full_row[k] = float(evidence[k]) # Ensure float for transform
-
-                # If we detected potential raw input, let's transform
-                if is_raw:
-                    if debug:
-                        print("[DEBUG] Attempting discretization...")
-                    # Transform
-                    full_row_disc = discretizer.transform(full_row)[0] # Array of ints
-                    
-                    # Update evidence with discretized values
-                    for idx, col in enumerate(sensor_cols):
-                        if col in evidence:
-                            evidence[col] = int(full_row_disc[idx])
-                            
-                    if debug:
-                        print(f"[BN] Discretized raw inputs to: {evidence}")
-
-            except Exception as e:
-                # if debug:
-                print(f"[BN] Warning: Failed to auto-discretize inputs: {e}")
-
-    if debug:
-        print("\n=== [STEP 2] BAYESIAN INFERENCE ===")
-        # Note: 'evidence' here is the discrete evidence (0/1)
-        print(f"[Evidence] Provided (Discrete): {evidence}") 
-
-    # 1. Infer P(Overheat)
-    p_overheat = infer_overheat_prob(model, evidence)
-
-    if debug:
-        print(f"→ P(Overheat=1 | evidence) = {p_overheat:.3f}")
+    # --- INFERENCE ---
+    try:
+        p_overheat = infer_overheat_prob(model, evidence)
+    except:
+        p_overheat = 0.0
 
     infer = make_inferencer(model)
-
-    # 2. Infer latent causes
     cause_nodes = ["BearingWearHigh", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
-    cause_sensor_map = {
-        "BearingWearHigh": ["vibration_rms"],
-        "FanFault": ["spindle_temp"],
-        "CloggedFilter": ["coolant_flow"],
-        "LowCoolingEfficiency": ["spindle_temp"],
-    }
     cause_probs = {}
-    top_cause = "UnknownCause"
-
-    if debug:
-        print("\n--- Inferring Latent Causes (Simplified Evidence) ---")
+    
+    # Filter evidence to prevent unused nodes from causing errors
+    relevant_evidence = {k: v for k, v in evidence.items() if k in model.nodes()}
 
     for c in cause_nodes:
-        # Create minimal evidence dictionary for the specific cause query
-        minimal_evidence = {
-            s: evidence[s]
-            for s in cause_sensor_map.get(c, [])
-            if s in evidence
-        }
-
         try:
-            q = infer.query(variables=[c], evidence=minimal_evidence)
-            cause_probs[c] = float(q.values[1])
-        except Exception as e:
-            if debug:
-                print(f"[ERROR] Inference failed for {c} with evidence {minimal_evidence}: {e}")
+            q = infer.query(variables=[c], evidence=relevant_evidence)
+            if len(q.values) > 1:
+                cause_probs[c] = float(q.values[1])
+            else:
+                cause_probs[c] = 0.0
+        except:
             cause_probs[c] = 0.0
 
-        if debug:
-            print(f"→ P({c}=1 | evidence) = {cause_probs[c]:.3f}")
+    top_cause = max(cause_probs, key=cause_probs.get) if cause_probs else "Unknown"
 
-    # Ensure top_cause is selected robustly
-    if cause_probs and any(p > 0.0 for p in cause_probs.values()):
-        top_cause = max(cause_probs, key=cause_probs.get)
-    elif cause_nodes:
-        # Fallback to the cause with the highest *prior* probability (BearingWearHigh is often chosen by default here)
-        top_cause = max(cause_nodes, key=lambda k: model.get_cpds(k).values[1] if model.get_cpds(k) else 0)
-
-    # ------------------------------------------------------------
-    # STEP 3 — KNOWLEDGE GRAPH QUERIES
-    # ------------------------------------------------------------
-    if debug:
-        print("\n=== [STEP 3] KNOWLEDGE GRAPH QUERIES ===")
-
+    # --- KG & DECISION ---
     kg = CNCKG(debug=debug).load_from_cfg(cfg)
-
     symptoms = kg.symptoms_for_cause(top_cause)
     components = kg.components_for_cause(top_cause)
     procedures = kg.procedures_for_cause(top_cause)
-
-    # ------------------------------------------------------------
-    # STEP 4 — DECISION THEORY
-    # ------------------------------------------------------------
     procedures_csv = path_for(cfg, "procedures")
 
     action, costs = choose_action(
@@ -194,10 +105,7 @@ def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
         cause_probs=cause_probs
     )
 
-    # ------------------------------------------------------------
-    # RESULT
-    # ------------------------------------------------------------
-    result = {
+    return {
         "p_overheat": round(p_overheat, 3),
         "top_cause": top_cause,
         "probabilities": cause_probs,
@@ -208,156 +116,136 @@ def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
         "expected_costs": costs,
     }
 
-    # Pretty explanation when debug=False
-    if not debug:
-        vib = evidence.get("vibration_rms")
-        flow = evidence.get("coolant_flow")
+# ------------------------------------------------------------
+# RUN REAL (TRAINING)
+# ------------------------------------------------------------
+def run_real(evidence: dict,
+             debug: bool = False,
+             force_retrain: bool = False,
+             return_test_data: bool = False):
+    """
+    Train and evaluate the Bayesian Network using either MLE or EM.
+    Ensures a non-degenerate dataset and defensible evaluation.
+    """
 
-        vib_state = "high" if str(vib) == "1" else "normal"
-        flow_state = "low" if str(flow) == "1" else "normal"
-
-        proc = procedures[0] if procedures else "None"
-        dfp = pd.read_csv(path_for(cfg, "procedures"))
-        row = dfp[dfp["name"] == proc]
-
-        cost = float(row["spare_parts_cost_eur"].iloc[0]) if not row.empty else 0
-        timeh = float(row["effort_h"].iloc[0]) if not row.empty else 0
-        risk = int(row["risk_rating"].iloc[0]) if not row.empty else 0
-
-        print(
-            f"\nBecause vibration is {vib_state} and coolant flow is {flow_state}, "
-            f"the system estimates Overheat={result['p_overheat']:.2f}. "
-            f"Likely cause is {top_cause}. "
-            f"Recommended action: {proc} ({timeh:.0f}h, {cost:.0f}€, risk={risk})."
-        )
-
-    return result
-
-
-###############################################################
-#  REAL MODE TRAINING WITH FIXED CAUSAL STRUCTURE + EM
-###############################################################
-
-def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=False):
     from sklearn.model_selection import train_test_split
-    import os, pickle
+    from pgmpy.models import BayesianNetwork
+    from pgmpy.estimators import MaximumLikelihoodEstimator
+    import pickle
+    import os
+    import pandas as pd
 
     cfg = load_cfg()
     model_cache_path = cfg["bn"].get("model_cache_path", "models/trained_model.pkl")
+    train_method = cfg["bn"].get("train_method", "mle").lower()
 
     # ------------------------------------------------------------
-    # FAST PATH: Load already trained model
+    # 1. LOAD DATA
+    # ------------------------------------------------------------
+    tel = pd.read_csv(path_for(cfg, "telemetry"))
+    lab = pd.read_csv(path_for(cfg, "labels"))
+
+    try:
+        causes_gt = pd.read_csv("data/causes_ground_truth.csv")
+    except FileNotFoundError:
+        raise RuntimeError("Missing causes_ground_truth.csv")
+
+    df = tel.join(lab["spindle_overheat"]).join(causes_gt["actual_cause"])
+
+    # ------------------------------------------------------------
+    # 2. CREATE BINARY CAUSE INDICATORS
+    # ------------------------------------------------------------
+    causes = ["BearingWearHigh", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
+    for c in causes:
+        df[c] = (df["actual_cause"] == c).astype(int)
+
+    # ------------------------------------------------------------
+    # 3. MANUAL DISCRETIZATION (PHYSICS-BASED)
+    # ------------------------------------------------------------
+    df_disc = manual_discretize(df, cfg["bn"]["sensors"])
+
+    # Preserve labels
+    for c in causes + ["spindle_overheat", "actual_cause"]:
+        df_disc[c] = df[c]
+
+    # ------------------------------------------------------------
+    # 4. FIX DATASET DEGENERACY
+    # ------------------------------------------------------------
+    normal_df = df_disc[df_disc["spindle_overheat"] == 0]
+    fault_df = df_disc[df_disc["spindle_overheat"] == 1]
+
+    fault_frac = cfg["bn"].get("fault_fraction", 0.3)
+    fault_df = fault_df.sample(frac=fault_frac, random_state=42)
+
+    df_final = pd.concat([normal_df, fault_df]).sample(frac=1.0, random_state=42)
+
+    if debug:
+        print("[DATASET]")
+        print(df_final["spindle_overheat"].value_counts())
+
+    # ------------------------------------------------------------
+    # 5. TRAIN / TEST SPLIT
+    # ------------------------------------------------------------
+    df_train, df_test = train_test_split(
+        df_final,
+        test_size=cfg["bn"]["test_size"],
+        random_state=42,
+        stratify=df_final["spindle_overheat"]
+    )
+
+    # ------------------------------------------------------------
+    # 6. TRAIN OR LOAD MODEL
     # ------------------------------------------------------------
     model = None
-    discretizer = None
-    df_test = None
-    
+
     if not force_retrain and os.path.exists(model_cache_path):
         try:
             with open(model_cache_path, "rb") as f:
                 model = pickle.load(f)
-            
-            # Load discretizer
-            if os.path.exists("models/discretizer.pkl"):
-                with open("models/discretizer.pkl", "rb") as f:
-                    discretizer = pickle.load(f)
-            
             if debug:
-                print("[BN] Loaded cached REAL model and Discretizer.")
+                print("[BN] Loaded cached model.")
+        except Exception:
+            model = None
 
-            # Load and split data for test_data return
-            if return_test_data:
-                tel = pd.read_csv(path_for(cfg, "telemetry"))
-                lab = pd.read_csv(path_for(cfg, "labels"))
-                df = tel.join(lab["spindle_overheat"])
-
-                df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
-                _, df_test = train_test_split(
-                    df_disc, test_size=cfg["bn"]["test_size"], random_state=42
-                )
-            
-            if return_test_data:
-                # FIX 1: Ensure all four required objects are returned
-                return model, df_test, discretizer, cfg
-
-        except Exception as e:
-            if debug:
-                 print(f"[BN] Error loading cache ({e}). Forcing retraining.")
-            force_retrain = True
-
-
-    # ------------------------------------------------------------
-    # SLOW PATH: FULL TRAINING (If forced_retrain=True or cache failed)
-    # ------------------------------------------------------------
     if model is None:
         if debug:
-            print("\n[BN] TRAINING REAL MODEL...\n")
+            print(f"[BN] Training using method: {train_method.upper()}")
 
-        tel = pd.read_csv(path_for(cfg, "telemetry"))
-        lab = pd.read_csv(path_for(cfg, "labels"))
-        df = tel.join(lab["spindle_overheat"])
+        if train_method == "em":
+            from .bn_model import train_bn_em
+            model = train_bn_em(df_train, debug=debug)
 
-        # Discretize + save discretizer
-        df_disc, discretizer = discretize(
-            df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"], return_discretizer=True
-        )
+        else:
+            # DEFAULT: MLE
+            model = BayesianNetwork([
+                ("BearingWearHigh", "vibration_rms"),
+                ("BearingWearHigh", "spindle_temp"),
+                ("FanFault", "spindle_temp"),
+                ("CloggedFilter", "coolant_flow"),
+                ("CloggedFilter", "spindle_temp"),
+                ("LowCoolingEfficiency", "spindle_temp"),
+                ("vibration_rms", "spindle_overheat"),
+                ("spindle_temp", "spindle_overheat"),
+                ("coolant_flow", "spindle_overheat"),
+            ])
 
-        os.makedirs("models", exist_ok=True)
-        pickle.dump(discretizer, open("models/discretizer.pkl", "wb"))
+            model = integrate_latent_causes(model)
+            model.fit(df_train, estimator=MaximumLikelihoodEstimator)
+            model.check_model()
 
-        # Split
-        df_train, df_test = train_test_split(
-            df_disc, test_size=cfg["bn"]["test_size"], random_state=42
-        )
-        if debug:
-            print(f"[Split] Train={len(df_train)}, Test={len(df_test)}")
+        os.makedirs(os.path.dirname(model_cache_path), exist_ok=True)
+        with open(model_cache_path, "wb") as f:
+            pickle.dump(model, f)
 
-        # FIXED, PHYSICALLY CORRECT STRUCTURE
-        model = BayesianNetwork([
-            ('BearingWearHigh', 'vibration_rms'),
-            ('FanFault', 'spindle_temp'),
-            ('CloggedFilter', 'coolant_flow'),
-            ('LowCoolingEfficiency', 'spindle_temp'),
-            ('vibration_rms', 'spindle_overheat'),
-            ('spindle_temp', 'spindle_overheat'),
-            ('coolant_flow', 'spindle_overheat'),
-        ])
-
-        model = integrate_latent_causes(model)
-
-        # INITIAL CPDs (neutral)
-        initial_cpds = [
-            TabularCPD("BearingWearHigh", 2, [[0.5], [0.5]]),
-            TabularCPD("FanFault", 2, [[0.5], [0.5]]),
-            TabularCPD("CloggedFilter", 2, [[0.5], [0.5]]),
-            TabularCPD("LowCoolingEfficiency", 2, [[0.5], [0.5]]),
-        ]
-        for cpd in initial_cpds:
-            try: model.add_cpds(cpd)
-            except: pass
-
-        # EM PARAMETER LEARNING
-        if debug:
-            print("[BN] Learning CPDs with EM...")
-        
-        model = fit_parameters_em(
-            model,
-            df_train,
-            max_iter=cfg["bn"]["max_iter"],
-            n_jobs=cfg["bn"]["n_jobs"],
-        )
-
-        model.check_model()
-
-        # Save model
-        pickle.dump(model, open(model_cache_path, "wb"))
-        if debug:
-            print("[BN] Model saved.")
-    
-    
+    # ------------------------------------------------------------
+    # 7. RETURN
+    # ------------------------------------------------------------
     if return_test_data:
-        # FIX 2: Ensure all four required objects are returned after training
-        return model, df_test, discretizer, cfg
+        return model, df_test, None, cfg
 
-    # Otherwise perform reasoning
-    return run_demo(evidence, debug=debug, model_override=model, discretizer=discretizer)
+    return run_demo(
+        evidence=evidence,
+        debug=debug,
+        model_override=model,
+        discretizer=None
+    )

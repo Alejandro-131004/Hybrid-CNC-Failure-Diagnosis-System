@@ -10,11 +10,15 @@ files:
   relations: "relations.csv"
 
 bn:
+  train_method: em
+  em_max_iter: 50
+  fault_fraction: 0.3
+
   discretize_bins: 2
   max_iter: 10
   test_size: 0.2
   bn_threshold: 0.3
-  sample_size: null          # or remove
+  sample_size: null
   model_cache_path: "models/trained_model.pkl"
   n_jobs: -1
   sensors: [

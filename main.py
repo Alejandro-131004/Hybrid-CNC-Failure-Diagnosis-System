@@ -1,4 +1,3 @@
-# main.py
 """
 main.py
 Entry point for the Hybrid CNC Diagnosis System
@@ -6,12 +5,14 @@ Entry point for the Hybrid CNC Diagnosis System
 
 import sys
 import random
-from src.integration import run_demo, run_real
-from src.evaluation import evaluate_bn
-from src.config import load_cfg, path_for
 import numpy as np
 import pandas as pd
 import os
+
+from src.integration import run_demo, run_real
+# [UPDATED] Added evaluate_root_causes to imports
+from src.evaluation import evaluate_bn, evaluate_root_causes
+from src.config import load_cfg, path_for
 
 # Global variables to store loaded items
 MODEL = None
@@ -108,7 +109,7 @@ def main():
             print("\n[DEMO] Evaluation is NOT available in manual mode.")
             print("Switch to REAL mode for full performance evaluation.\n")
         
-        return # End DEMO mode (Syntax FIX)
+        return # End DEMO mode
 
 
     # ============================================================
@@ -116,6 +117,7 @@ def main():
     # ============================================================
 
     # Capture all 4 return values from run_real: model, test_data_disc, discretizer, cfg
+    # TEST_DATA now contains 'actual_cause' if integration.py was updated correctly
     MODEL, TEST_DATA, DISCRETIZER, CFG = run_real(
         evidence=None,
         debug=debug,
@@ -160,22 +162,22 @@ def main():
         lab = pd.read_csv(path_for(CFG, "labels"))
         df_raw = tel.join(lab["spindle_overheat"])
 
-        # [FIX] Filter for ACTUAL FAULTS to ensure the demo is interesting
+        # Filter for ACTUAL FAULTS to ensure the demo is interesting
         # We look for rows in TEST_DATA where the target 'spindle_overheat' is 1
         faulty_data = TEST_DATA[TEST_DATA['spindle_overheat'] == 1]
         
-        # Se existirem falhas no conjunto de teste, escolhe uma delas.
-        # Caso contrário, escolhe aleatoriamente.
+        # If faults exist in test set, pick one. Otherwise random.
         if not faulty_data.empty:
             idx = faulty_data.sample(1).index[0]
-            # print(f"[INFO] Demo: Selected a known FAULTY sample (Index {idx}) to show detection capabilities.")
+            if debug:
+                print(f"[INFO] Demo: Selected a known FAULTY sample (Index {idx})")
         else:
             idx = TEST_DATA.sample(1).index[0]
 
         sample_disc = TEST_DATA.loc[idx]     # DISCRETE for BN inference
         sample_raw = df_raw.loc[idx]         # CONTINUOUS only for the display
 
-        # Discrete evidence for BN:
+        # Discrete evidence for BN (exclude actual_cause if present)
         evidence = {col: int(sample_disc[col]) for col in sensor_cols if col in sample_disc.index}
 
         # Pretty continuous evidence for printing:
@@ -185,6 +187,10 @@ def main():
         }
 
         print("\n[Evidence]:", evidence_readable)
+        
+        # Check ground truth if available
+        if 'actual_cause' in sample_disc:
+            print(f"[Ground Truth Cause]: {sample_disc['actual_cause']}")
 
         # Run full BN → KG → Decision pipeline
         result = run_demo(
@@ -203,7 +209,7 @@ def main():
     elif choice == 3:
         print("\n[REAL] Evaluating on full test set...\n")
         
-        # Ensure all necessary objects are passed to the evaluation function
+        # 1. Standard BN Evaluation (Target: Overheat)
         metrics = evaluate_bn(
             model=MODEL, 
             test_data=TEST_DATA, 
@@ -211,12 +217,15 @@ def main():
             cfg=CFG,
             debug=debug
         )
+
+        # 2. Root Cause Diagnosis Evaluation (Target: Actual Cause)
+        # This requires TEST_DATA to have 'actual_cause' column
+        evaluate_root_causes(MODEL, TEST_DATA, debug=debug)
         
         # Confirmation print
         if metrics:
             print("\n--- Evaluation Complete ---")
-            # Assuming 'Summary' key holds the main metrics (F1, Recall, Precision)
-            print("Summary Metrics:", metrics.get('Summary', {}))
+            print("Summary Metrics (Overheat Detection):", metrics.get('Summary', {}))
 
 
 if __name__ == "__main__":

@@ -271,3 +271,67 @@ def print_cpds(model: BayesianNetwork):
     for cpd in model.get_cpds():
         print(f"\nCPD for {cpd.variable}:")
         print(cpd)
+
+def train_bn_em(df_train, debug=False, max_iter=50):
+    """
+    Train a Bayesian Network using Expectation–Maximization (EM).
+
+    IMPORTANT:
+    - pgmpy EM requires:
+        * ONLY BN variables in the dataframe
+        * NO NaN values
+        * ALL variables discrete (int)
+    """
+
+    from pgmpy.models import BayesianNetwork
+    from pgmpy.estimators import ExpectationMaximization
+
+    # ------------------------------------------------------------
+    # 1. Define BN structure (same as MLE)
+    # ------------------------------------------------------------
+    model = BayesianNetwork([
+        ("BearingWearHigh", "vibration_rms"),
+        ("BearingWearHigh", "spindle_temp"),
+        ("FanFault", "spindle_temp"),
+        ("CloggedFilter", "coolant_flow"),
+        ("CloggedFilter", "spindle_temp"),
+        ("LowCoolingEfficiency", "spindle_temp"),
+        ("vibration_rms", "spindle_overheat"),
+        ("spindle_temp", "spindle_overheat"),
+        ("coolant_flow", "spindle_overheat"),
+    ])
+
+    model = integrate_latent_causes(model)
+
+    bn_nodes = list(model.nodes())
+
+    # ------------------------------------------------------------
+    # 2. FILTER DATAFRAME (CRITICAL FIX)
+    # ------------------------------------------------------------
+    df_em = df_train[bn_nodes].copy()
+
+    # Force numeric discrete values
+    for col in df_em.columns:
+        df_em[col] = (
+            df_em[col]
+            .astype("Int64")   # nullable int
+            .fillna(0)
+            .astype(int)
+        )
+
+    if debug:
+        print("[BN-EM] Training with Expectation–Maximization")
+        print(f"[BN-EM] max_iter = {max_iter}")
+        print(f"[BN-EM] Using variables: {bn_nodes}")
+        print("[BN-EM] NaN check:", df_em.isna().sum().sum())
+
+    # ------------------------------------------------------------
+    # 3. RUN EM
+    # ------------------------------------------------------------
+    em = ExpectationMaximization(model, df_em)
+    cpds = em.get_parameters(max_iter=max_iter)
+
+    model.add_cpds(*cpds)
+    model.check_model()
+
+    return model

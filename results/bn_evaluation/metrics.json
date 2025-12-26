@@ -1,19 +1,19 @@
 {
     "threshold_used": 0.3,
-    "accuracy": 0.7715567129629629,
-    "precision_overheat": 0.4556537640963121,
-    "recall_overheat": 0.7196149217809867,
-    "f1_score_overheat": 0.5579919753662406,
-    "brier_score": 0.113465638501664,
+    "accuracy": 0.9983238782877772,
+    "precision_overheat": 0.9885209713024282,
+    "recall_overheat": 1.0,
+    "f1_score_overheat": 0.9942273534635879,
+    "brier_score": 0.0016534761664523609,
     "confusion_matrix": [
         [
-            13009,
-            3572
+            13247,
+            26
         ],
         [
-            1165,
-            2990
+            0,
+            2239
         ]
     ],
-    "classification_report": "              precision    recall  f1-score   support\n\n  Normal (0)       0.92      0.78      0.85     16581\nOverheat (1)       0.46      0.72      0.56      4155\n\n    accuracy                           0.77     20736\n   macro avg       0.69      0.75      0.70     20736\nweighted avg       0.83      0.77      0.79     20736\n"
+    "classification_report": "              precision    recall  f1-score   support\n\n  Normal (0)       1.00      1.00      1.00     13273\nOverheat (1)       0.99      1.00      0.99      2239\n\n    accuracy                           1.00     15512\n   macro avg       0.99      1.00      1.00     15512\nweighted avg       1.00      1.00      1.00     15512\n"
 }

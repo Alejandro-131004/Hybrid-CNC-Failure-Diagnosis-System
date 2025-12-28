@@ -10,9 +10,9 @@ files:
   relations: "relations.csv"
 
 bn:
-  train_method: em
+  train_method: mle
   em_max_iter: 50
-  fault_fraction: 0.3
+  fault_fraction: 1
 
   discretize_bins: 2
   max_iter: 10

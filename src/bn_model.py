@@ -308,7 +308,9 @@ def train_bn_em(df_train, debug=False, max_iter=50):
     # ------------------------------------------------------------
     # 2. FILTER DATAFRAME (CRITICAL FIX)
     # ------------------------------------------------------------
-    df_em = df_train[bn_nodes].copy()
+    # REMOVE LATENT VARIABLES FROM DATA TO FORCE EM TO LEARN THEM
+    observed_nodes = [n for n in bn_nodes if n not in model.latents]
+    df_em = df_train[observed_nodes].copy()
 
     # Force numeric discrete values
     for col in df_em.columns:

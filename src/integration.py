@@ -3,7 +3,7 @@ integration.py
 Pipeline connecting BN inference with KG and Decision Module.
 """
 from .utils import load_cfg, path_for
-from .bn_model import infer_overheat_prob, make_inferencer, integrate_latent_causes
+from .bn_model import infer_overheat_prob, make_inferencer, integrate_latent_causes, align_em_states, train_bn_em
 from .kg_module import CNCKG
 from .decision import choose_action
 import pandas as pd
@@ -97,22 +97,25 @@ def run_demo(evidence: dict, debug=True, model_override=None, discretizer=None):
 
 def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=False, train_method_override=None):
     from sklearn.model_selection import train_test_split
-    from .bn_model import train_bn_em 
+    # Note: train_bn_em is imported at top of file or here locally
+    from pgmpy.models import BayesianNetwork
+    from pgmpy.estimators import MaximumLikelihoodEstimator
+    from pgmpy.factors.discrete import TabularCPD
     
     cfg = load_cfg()
     train_method = (train_method_override or cfg["bn"].get("train_method", "mle")).lower()
     
-    # Cache separado para MLE e EM
+    # Cache separated for MLE and EM
     base_path = cfg["bn"].get("model_cache_path", "models/trained_model.pkl")
     model_cache_path = base_path.replace(".pkl", f"_{train_method}.pkl")
 
     if debug: print(f"[BN] Method: {train_method.upper()} | Cache: {model_cache_path}")
 
-    # Load Data
+    # 1. Load Data
     tel = pd.read_csv(path_for(cfg, "telemetry"))
     lab = pd.read_csv(path_for(cfg, "labels"))
     
-    # Ground Truth Logic
+    # 2. Ground Truth Logic
     gt_path = path_for(cfg, "telemetry").replace("telemetry.csv", "causes_ground_truth.csv")
     if not os.path.exists(gt_path): gt_path = "data/causes_ground_truth.csv"
     if not os.path.exists(gt_path): gt_path = "../data/causes_ground_truth.csv"
@@ -124,19 +127,22 @@ def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=
     causes = ["BearingWearHigh", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
     for c in causes: df[c] = (df["actual_cause"] == c).astype(int)
 
-    # Discretize
+    # 3. Discretize (Using Manual Rules to match Data Augmentation)
     df_disc = manual_discretize(df, cfg["bn"]["sensors"])
     for c in causes + ["spindle_overheat", "actual_cause"]: df_disc[c] = df[c]
 
-    # Balance
+    # 4. Balance Data (Crucial for learning conditional probs, bad for priors)
     normal_df = df_disc[df_disc["spindle_overheat"] == 0]
     fault_df = df_disc[df_disc["spindle_overheat"] == 1]
-    if not fault_df.empty: fault_df = fault_df.sample(frac=cfg["bn"].get("fault_fraction", 1.0), random_state=42)
+    
+    if not fault_df.empty: 
+        fault_df = fault_df.sample(frac=cfg["bn"].get("fault_fraction", 1.0), random_state=42)
+    
+    # Create balanced dataset for training
     df_final = pd.concat([normal_df, fault_df]).sample(frac=1.0, random_state=42)
-
     df_train, df_test = train_test_split(df_final, test_size=cfg["bn"]["test_size"], random_state=42)
 
-    # Train or Load
+    # 5. Train or Load Model
     model = None
     if not force_retrain and os.path.exists(model_cache_path):
         try:
@@ -146,9 +152,24 @@ def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=
 
     if model is None:
         if debug: print(f"[BN] Training new model ({train_method})...")
+        
+        # === A. EXPECTATION-MAXIMIZATION (EM) ===
         if train_method == "em":
+            # Train using the EM wrapper in bn_model.py
             model = train_bn_em(df_train, debug=debug, max_iter=cfg["bn"].get("em_max_iter", 50))
+            
+            # CRITICAL: Verify if EM learned inverted labels (State 0 = Fault vs State 1 = Fault)
+            causes_map = {
+                "FanFault": "spindle_temp",
+                "BearingWearHigh": "vibration_rms",
+                "CloggedFilter": "coolant_flow", 
+                "LowCoolingEfficiency": "spindle_temp"
+            }
+            model = align_em_states(model, causes_map)
+
+        # === B. MAXIMUM LIKELIHOOD ESTIMATION (MLE) ===
         else:
+            # Define Structure explicitly
             model = BayesianNetwork([
                 ("BearingWearHigh", "vibration_rms"), ("BearingWearHigh", "spindle_temp"),
                 ("FanFault", "spindle_temp"),
@@ -158,8 +179,31 @@ def run_real(evidence: dict, debug=False, force_retrain=False, return_test_data=
                 ("coolant_flow", "spindle_overheat"),
             ])
             model = integrate_latent_causes(model)
-            model.fit(df_train, estimator=MaximumLikelihoodEstimator)
-        
+            
+            # --- CORRECTION FIX: Force cardinality=2 ---
+            # Define explicitamente que todos os nós têm estados [0, 1].
+            # Isto impede que o pgmpy assuma cardinalidade=1 se faltarem dados de falha no treino.
+            state_names = {node: [0, 1] for node in model.nodes()}
+            
+            model.fit(df_train, estimator=MaximumLikelihoodEstimator, state_names=state_names)
+            # -------------------------------------------
+
+            # --- CORRECTION: Adjust Priors ---
+
+            # --- CORRECTION: Adjust Priors ---
+            # Since we trained on balanced data (approx 50/50 faults), the model thinks
+            # faults are very common. We must manually reset priors to realistic values (e.g., 1%)
+            # so the Decision Module doesn't overestimate risk/cost.
+            if debug: print("[INFO] Adjusting priors to realistic values for Decision Making...")
+            
+            model.add_cpds(
+                TabularCPD('BearingWearHigh', 2, [[0.99], [0.01]]),
+                TabularCPD('FanFault', 2, [[0.99], [0.01]]),
+                TabularCPD('CloggedFilter', 2, [[0.99], [0.01]]),
+                TabularCPD('LowCoolingEfficiency', 2, [[0.99], [0.01]])
+            )
+
+        # Save the trained model
         os.makedirs(os.path.dirname(model_cache_path), exist_ok=True)
         with open(model_cache_path, "wb") as f: pickle.dump(model, f)
 

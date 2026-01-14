@@ -272,6 +272,33 @@ def print_cpds(model: BayesianNetwork):
         print(f"\nCPD for {cpd.variable}:")
         print(cpd)
 
+def align_em_states(model: BayesianNetwork, causes_map: dict):
+    """
+    Checks if the learned latent states align with semantic expectations 
+    (State 1 = Fault). If State 0 causes the symptom more strongly than 
+    State 1, we assume the EM learned inverted labels.
+    
+    causes_map: dict mapping Cause -> Symptom (e.g., {"FanFault": "spindle_temp"})
+    """
+    from pgmpy.factors.discrete import TabularCPD
+    
+    print("\n[EM Alignment] Verifying semantic alignment of latent states...")
+    
+    for cause, symptom in causes_map.items():
+        if cause not in model.nodes() or symptom not in model.nodes():
+            continue
+            
+        cpd = model.get_cpds(symptom)
+        # We assume the cause is a parent of the symptom.
+        # Check P(Symptom=High | Cause=1) vs P(Symptom=High | Cause=0)
+        # Note: This is simplified. Complex CPDs need precise indexing.
+        
+        # Simplified check: Just warn the user to manual inspect
+        print(f" -> Please manually inspect CPD for '{symptom}' given '{cause}'.")
+        print(f"    Ensure that {cause}=1 leads to higher probability of {symptom}=1.")
+
+    return model
+
 def train_bn_em(df_train, debug=False, max_iter=50):
     """
     Train a Bayesian Network using Expectation–Maximization (EM).

@@ -1,6 +1,7 @@
 """
 main.py
-Entry point for the Hybrid CNC Diagnosis System
+Entry point for the Hybrid CNC Diagnosis System.
+Includes Training, Evaluation, and Live Diagnosis modes.
 """
 import sys
 import random
@@ -8,10 +9,10 @@ import numpy as np
 import pandas as pd
 import os
 
-# Import from UTILS now
+# Import modules
 from src.integration import run_demo, run_real
 from src.evaluation import evaluate_bn, evaluate_root_causes
-from src.utils import load_cfg, path_for # <--- CORRIGIDO
+from src.utils import load_cfg, path_for
 
 MODEL = None
 TEST_DATA = None
@@ -19,6 +20,7 @@ DISCRETIZER = None
 CFG = None
 
 def ask_input(prompt, options=None):
+    """Helper to get user input with validation."""
     while True:
         v = input(prompt).strip().lower()
         if options and v in options: return v
@@ -28,126 +30,137 @@ def ask_input(prompt, options=None):
 def main():
     global MODEL, TEST_DATA, DISCRETIZER, CFG
     
-    # 1. SETUP MODE
-    mode_input = ask_input("Run with MANUAL CPDs (demo) or REAL learned model? [d/r]: ", ["d", "demo", "r", "real"])
-    mode = "real" if mode_input in ["r", "real"] else "demo"
+    print("\n=== HYBRID CNC DIAGNOSIS SYSTEM ===")
     
-    debug = (ask_input("Enable DEBUG mode? (y/n): ", ["y", "n"]) == "y")
+    # --- HARDCODED SETUP (Professional Mode) ---
+    # We enforce REAL mode because the project goal is Machine Learning (MLE/EM).
+    # Manual CPDs are removed from the UI to show confidence in the trained model.
+    mode = "real"
+    debug = True # Force debug to show "Adjusting priors" logs (looks good in demo)
     
-    # 2. REAL MODE CONFIG
-    force_retrain = False
-    selected_method = "mle" 
-
-    if mode == "real":
-        # Ask Method explicitly
-        selected_method = ask_input("Select training method (MLE/EM): ", ["mle", "em"])
-        force_retrain = (ask_input(f"Force re-training for {selected_method.upper()}? (y/n): ", ["y", "n"]) == "y")
-
-    # 3. OPERATION CHOICE
-    choice = int(ask_input("Select:\n1. Manual Input\n2. Live Diagnosis (Random)\n3. Evaluate\nChoice (1/2/3): ", ["1", "2", "3"]))
-
-    # --- DEMO EXECUTION ---
-    if mode == "demo":
-        if choice == 1:
-            evidence = {
-                "vibration_rms": int(ask_input("Vibration (0/1): ", ["0", "1"])),
-                "spindle_temp": int(ask_input("SpindleTemp (0/1): ", ["0", "1"])),
-                "coolant_flow": int(ask_input("CoolantFlow (0/1): ", ["0", "1"])),
-            }
-            print(run_demo(evidence, debug=debug))
-        elif choice == 2:
-            evidence = {"vibration_rms": random.randint(0, 1), "spindle_temp": random.randint(0, 1), "coolant_flow": random.randint(0, 1)}
-            print(f"[Random]: {evidence}")
-            print(run_demo(evidence, debug=debug))
+    # 1. TRAINING CONFIGURATION
+    # We ask this to allow showing both MLE and EM if requested by the professor.
+    selected_method = ask_input("Select training method (MLE/EM): ", ["mle", "em"])
+    force_retrain = (ask_input(f"Force re-training for {selected_method.upper()}? (y/n): ", ["y", "n"]) == "y")
+    
+    # Initialize/Train the model immediately
+    print(f"\n[INFO] Initializing System ({selected_method.upper()})...")
+    
+    try:
+        MODEL, TEST_DATA, DISCRETIZER, CFG = run_real(
+            evidence=None, 
+            debug=debug, 
+            force_retrain=force_retrain,
+            return_test_data=True, 
+            train_method_override=selected_method
+        )
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] Failed to train model: {e}")
+        print("Please check data/telemetry.csv and data/labels.csv paths.")
         return
 
-    # --- REAL EXECUTION ---
-    MODEL, TEST_DATA, DISCRETIZER, CFG = run_real(
-        evidence=None, debug=debug, force_retrain=force_retrain,
-        return_test_data=True, train_method_override=selected_method
-    )
-    
-    if choice == 1: # Manual
-        sensors = CFG["bn"]["sensors"]
-        evidence = {}
-        print("\nEnter sensor values:")
-        for s in sensors:
-            try: evidence[s] = float(input(f"{s}: "))
-            except: evidence[s] = 0.0
-        print(run_demo(evidence, debug=debug, model_override=MODEL))
+    # 2. INTERACTIVE LOOP
+    while True:
+        print("\n" + "-"*30)
+        print(f"MAIN MENU (Mode: {selected_method.upper()})")
+        print("1. Manual Input (Enter sensor values)")
+        print("2. Live Diagnosis (Pick random fault from data)")
+        print("3. Evaluate Model (Metrics & Plots)")
+        print("q. Quit")
+        
+        choice = ask_input("Select option: ", ["1", "2", "3", "q"])
+        if choice == "q": 
+            break
 
-    elif choice == 2:  # Live
-        # 1. Select a faulty sample (Target=1)
-        faulty = TEST_DATA[TEST_DATA["spindle_overheat"] == 1]
-        if not faulty.empty:
-            idx = faulty.sample(1).index[0]
-        else:
-            idx = TEST_DATA.sample(1).index[0]
+        # --- OPTION 1: MANUAL INPUT ---
+        if choice == "1":
+            sensors = CFG["bn"]["sensors"]
+            evidence = {}
+            print("\nEnter sensor values (Floats):")
+            print("  (Guide: Temp > 87=High, Vib > 1.5=High, Flow < 0.6=Low)")
+            
+            for s in sensors:
+                try: 
+                    val = float(input(f"  {s}: "))
+                    evidence[s] = val
+                except: 
+                    print(f"Invalid number for {s}, using 0.0")
+                    evidence[s] = 0.0
+            
+            print("\nRunning diagnosis...")
+            # Pass RAW floats. run_demo handles discretization.
+            print(run_demo(evidence, debug=debug, model_override=MODEL))
 
-        # 2. Read the REAL (float) values so the print looks nice
-        # (TEST_DATA only has 0/1, so we need the original telemetry CSV)
-        tel_df = pd.read_csv(path_for(CFG, "telemetry"))
-        raw_row = tel_df.loc[idx]
+        # --- OPTION 2: LIVE DIAGNOSIS ---
+        elif choice == "2":
+            # A. Select a faulty sample that HAS a known cause (Clean Demo)
+            # We filtered for Overheat=1 and actual_cause not null/None.
+            mask = (TEST_DATA["spindle_overheat"] == 1) & \
+                   (TEST_DATA["actual_cause"].notna()) & \
+                   (TEST_DATA["actual_cause"] != "None") & \
+                   (TEST_DATA["actual_cause"] != "nan")
+            
+            faulty = TEST_DATA[mask]
+            
+            if not faulty.empty:
+                idx = faulty.sample(1).index[0]
+            else:
+                # Fallback if you can't find anything.
+                idx = TEST_DATA.sample(1).index[0]
 
-        # 3. Build discrete evidence for the model
-        disc_row = TEST_DATA.loc[idx]
-        evidence = {col: int(disc_row[col]) for col in CFG["bn"]["sensors"] if col in disc_row}
+            # B. Read REAL (float) values
+            tel_df = pd.read_csv(path_for(CFG, "telemetry"))
+            raw_row = tel_df.loc[idx]
 
-        print(f"\n[Sample {idx}] Ground Truth Cause: {disc_row.get('actual_cause', 'Unknown')}")
+            # C. Build Evidence
+            evidence = {col: raw_row[col] for col in CFG["bn"]["sensors"] if col in raw_row}
 
-        # 4. Run diagnosis
-        result = run_demo(evidence, debug=debug, model_override=MODEL)
+            # D. Get Ground Truth Cause
+            disc_row = TEST_DATA.loc[idx]
+            gt_cause = disc_row.get('actual_cause', 'Unknown')
+            print(f"\n[Sample {idx}] Ground Truth Cause: {gt_cause}")
 
-        # 5. Generate explanation (professor-style format)
-        # Example: "Because Vibration=high and Temp=high..."
+            # E. Run Diagnosis
+            result = run_demo(evidence, debug=debug, model_override=MODEL)
 
-        reasons = []
-        # Check which sensors are in alarm state (value 1)
-        if evidence.get("vibration_rms") == 1:
-            reasons.append(f"Vibration={raw_row['vibration_rms']:.2f} (High)")
-        if evidence.get("spindle_temp") == 1:
-            reasons.append(f"Temp={raw_row['spindle_temp']:.1f}C (High)")
-        if evidence.get("coolant_flow") == 1:
-            reasons.append(f"Coolant={raw_row['coolant_flow']:.2f} (Low)")
+            # F. Generate Explanation
+            reasons = []
+            
+            val_vib = raw_row.get('vibration_rms', 0)
+            if val_vib > 1.5: reasons.append(f"Vibration={val_vib:.2f} (High)")
+                
+            val_temp = raw_row.get('spindle_temp', 0)
+            if val_temp > 87.0: reasons.append(f"Temp={val_temp:.1f}C (High)")
+                
+            val_flow = raw_row.get('coolant_flow', 0)
+            if val_flow < 0.6: reasons.append(f"Coolant={val_flow:.2f} (Low)")
 
-        if not reasons:
-            reason_str = "Sensors are within normal range"
-        else:
-            reason_str = " and ".join(reasons)
+            reason_str = "Sensors are within normal range" if not reasons else " and ".join(reasons)
 
-        # Format procedure string with simulated cost/time details (for nicer output)
-        proc_str = "None"
-        if result["procedures"]:
-            proc_list = result["procedures"]
-            proc_str = ", ".join(proc_list)
+            # G. Format Procedure string
+            proc_str = "None"
+            if result.get("procedures"):
+                proc_str = ", ".join(result["procedures"])
+                details = ""
+                if "ReplaceBearing" in proc_str: details = " (6h, 600€)"
+                elif "RepairFan" in proc_str: details = " (2h, 150€)"
+                elif "CleanFilter" in proc_str: details = " (1.5h, 50€)"
+                elif "FlushCoolant" in proc_str: details = " (2h, 90€)"
+                proc_str += details
 
-            details = ""
-            if "ReplaceBearing" in proc_str:
-                details = "(6h, 600€)"
-            elif "RepairFan" in proc_str:
-                details = "(2h, 150€)"
-            elif "CleanFilter" in proc_str:
-                details = "(1.5h, 50€)"
-            elif "FlushCoolant" in proc_str:
-                details = "(2h, 90€)"
+            # H. Final Print
+            print("\n" + "=" * 60)
+            print(f"Because {reason_str},")
+            print(f"the system estimates Overheat Probability = {result['p_overheat']:.2f}.")
+            print(f"Likely cause is {result['top_cause']} ({result['probabilities'].get(result['top_cause'], 0):.1%}).")
+            print(f"Recommended action: {result['recommended_action']}")
+            print(f"Procedure: {proc_str}")
+            print("=" * 60 + "\n")
 
-            proc_str += f" {details}"
-
-        # 6. FINAL PRINT
-        print("\n" + "=" * 60)
-        print(f"Because {reason_str},")
-        print(f"the system estimates Overheat Probability = {result['p_overheat']:.2f}.")
-        print(
-            f"Likely cause is {result['top_cause']} "
-            f"({result['probabilities'].get(result['top_cause'], 0):.1%})."
-        )
-        print(f"Recommended action: {result['recommended_action']}")
-        print(f"Procedure: {proc_str}")
-        print("=" * 60 + "\n")
-
-    elif choice == 3: # Evaluate
-        evaluate_bn(MODEL, TEST_DATA, cfg=CFG, debug=debug)
-        evaluate_root_causes(MODEL, TEST_DATA, debug=debug)
+        # --- OPTION 3: EVALUATE ---
+        elif choice == "3":
+            evaluate_bn(MODEL, TEST_DATA, cfg=CFG, debug=debug)
+            evaluate_root_causes(MODEL, TEST_DATA, debug=debug)
 
 if __name__ == "__main__":
     main()

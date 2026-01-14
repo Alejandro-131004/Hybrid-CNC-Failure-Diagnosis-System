@@ -10,6 +10,8 @@ import pandas as pd
 # === Helper: compute expected cost and risk over causes
 # ==============================================================
 
+# src/decision.py
+
 def _compute_expected_cause_costs(cause_probs: dict[str, float] | None,
                                   procedures_df: pd.DataFrame,
                                   top_cause: str | None):
@@ -32,7 +34,20 @@ def _compute_expected_cause_costs(cause_probs: dict[str, float] | None,
     cost_col = "spare_parts_cost_eur"
     risk_col = "risk_rating"
 
-    for cause, p_c in cause_probs.items():
+    # --- CORRECTION START: Normalize Probabilities ---
+    # We must normalize the probabilities to sum to 1.0 relative to the faults.
+    # Otherwise, if we use low priors (e.g. 1%), the sum of probabilities is tiny (~0.04),
+    # resulting in a negligible risk penalty (Cost * 0.04), leading to "Continue" erroneously.
+    total_p = sum(cause_probs.values())
+    
+    if total_p > 1e-9: # Avoid division by zero
+        # Use normalized weights to calculate the Weighted Average Risk/Cost
+        norm_probs = {k: v / total_p for k, v in cause_probs.items()}
+    else:
+        norm_probs = cause_probs
+    # --- CORRECTION END ---
+
+    for cause, p_c in norm_probs.items():
         if p_c <= 0:
             continue
 

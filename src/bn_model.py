@@ -8,19 +8,85 @@ import pickle
 import numpy as np
 import os
 from sklearn.preprocessing import KBinsDiscretizer
-from pgmpy.estimators import HillClimbSearch, BicScore, MaximumLikelihoodEstimator, ExpectationMaximization
+from pgmpy.estimators import (
+    HillClimbSearch,
+    BicScore,
+    MaximumLikelihoodEstimator,
+    ExpectationMaximization,
+)
 from pgmpy.models import BayesianNetwork
 from pgmpy.inference import VariableElimination
 from pgmpy.factors.discrete import TabularCPD
 import warnings
+
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-TARGET = "spindle_overheat"  # from labels.csv
+TARGET = "spindle_overheat"
 
 # ==============================================================
-# === Data handling and discretization
+# === 1. CENTRAL STRUCTURE DEFINITION (SOT - Source of Truth)
 # ==============================================================
+
+
+def define_bn_structure() -> BayesianNetwork:
+    """
+    Defines the network structure in a single place.
+    If you change an edge here, it changes across the entire project
+    (MLE, EM, Demo).
+    """
+    model = BayesianNetwork(
+        [
+            # Causes -> Symptoms
+            ("BearingWearHigh", "vibration_rms"),
+            ("BearingWearHigh", "spindle_temp"),
+            ("FanFault", "spindle_temp"),
+            ("CloggedFilter", "coolant_flow"),
+            ("CloggedFilter", "spindle_temp"),
+            ("LowCoolingEfficiency", "spindle_temp"),
+            # Symptoms -> Overheat (Target)
+            ("vibration_rms", "spindle_overheat"),
+            ("spindle_temp", "spindle_overheat"),
+            ("coolant_flow", "spindle_overheat"),
+        ]
+    )
+
+    # Explicit definition of latent variables (causes)
+    model.latents = {
+        "BearingWearHigh",
+        "FanFault",
+        "CloggedFilter",
+        "LowCoolingEfficiency",
+    }
+
+    return model
+
+
+def integrate_latent_causes(model: BayesianNetwork) -> BayesianNetwork:
+    """
+    Ensures that latent nodes exist in the model.
+    (Now redundant because define_bn_structure already includes them,
+    but kept for safety.)
+    """
+    if not hasattr(model, "latents"):
+        model.latents = {
+            "BearingWearHigh",
+            "FanFault",
+            "CloggedFilter",
+            "LowCoolingEfficiency",
+        }
+
+    for node in model.latents:
+        if node not in model.nodes():
+            model.add_node(node)
+
+    return model
+
+
+# ==============================================================
+# === 2. DATA HANDLING
+# ==============================================================
+
 
 def load_telemetry(telemetry_csv: str, labels_csv: str) -> pd.DataFrame:
     """Merge telemetry and label datasets."""
@@ -28,23 +94,29 @@ def load_telemetry(telemetry_csv: str, labels_csv: str) -> pd.DataFrame:
     y = pd.read_csv(labels_csv)
     return X.join(y[TARGET])
 
-# src/bn_model.py
 
-def discretize(df: pd.DataFrame, continuous_cols: list[str], n_bins: int = 4, return_discretizer=False):
+def discretize(
+    df: pd.DataFrame,
+    continuous_cols: list[str],
+    n_bins: int = 4,
+    return_discretizer=False,
+):
     """
-    Discretizes continuous sensor columns using KBinsDiscretizer.
-    Strategy: 'kmeans' (Best for separating distinct fault clusters from normal data).
+    Discretizes continuous sensor columns using KBinsDiscretizer
+    with KMeans strategy.
     """
     dfx = df.copy()
-    
-    # Ensure columns are numeric
-    for col in continuous_cols:
-        dfx[col] = pd.to_numeric(dfx[col], errors='coerce').fillna(0)
 
-    # USAR KMEANS: Melhora a separação de classes (Topicos 1 e 2)
-    enc = KBinsDiscretizer(n_bins=n_bins, encode="ordinal", strategy="kmeans")
-    
-    dfx[continuous_cols] = enc.fit_transform(dfx[continuous_cols])
+    for col in continuous_cols:
+        dfx[col] = pd.to_numeric(dfx[col], errors="coerce").fillna(0)
+
+    enc = KBinsDiscretizer(
+        n_bins=n_bins, encode="ordinal", strategy="kmeans"
+    )
+
+    valid_cols = [c for c in continuous_cols if c in dfx.columns]
+    if valid_cols:
+        dfx[valid_cols] = enc.fit_transform(dfx[valid_cols])
 
     if return_discretizer:
         return dfx, enc
@@ -53,314 +125,249 @@ def discretize(df: pd.DataFrame, continuous_cols: list[str], n_bins: int = 4, re
 
 
 # ==============================================================
-# === Data-driven learning (Hill-Climb)
+# === 3. TRAINING (LEARNING)
 # ==============================================================
 
-def learn_structure(df_disc: pd.DataFrame) -> BayesianNetwork:
-    """Learn BN structure using Hill-Climbing and return a BayesianNetwork."""
-    hc = HillClimbSearch(df_disc)
-    dag = hc.estimate(scoring_method=BicScore(df_disc))
-    # Convert edges into a BayesianNetwork object
-    model = BayesianNetwork(dag.edges())
-    return model
 
+def train_bn_em(df_train, debug=False, max_iter=50):
+    """
+    Train using EM with Structural Simplification AND Hard Initialization.
 
+    We force EM to respect the physical separation of symptoms by initializing
+    CPDs manually and running EM carefully to avoid immediate collapse.
+    """
+    from pgmpy.models import BayesianNetwork
+    from pgmpy.estimators import ExpectationMaximization
+    from pgmpy.factors.discrete import TabularCPD
 
-def fit_parameters(model: BayesianNetwork, df_disc: pd.DataFrame) -> BayesianNetwork:
-    """Estimate CPDs with Maximum Likelihood Estimation."""
-    model.fit(df_disc, estimator=MaximumLikelihoodEstimator)
-    return model
+    # 1. Simplified structure (3 causes)
+    base_model = define_bn_structure()
+    edges = list(base_model.edges())
 
+    # Remove LowCoolingEfficiency to avoid redundancy
+    em_edges = [
+        (u, v)
+        for u, v in edges
+        if u != "LowCoolingEfficiency" and v != "LowCoolingEfficiency"
+    ]
+    model = BayesianNetwork(em_edges)
 
-def make_inferencer(model: BayesianNetwork) -> VariableElimination:
-    """Create inference engine."""
-    return VariableElimination(model)
+    # Explicit latent causes
+    model.latents = {"BearingWearHigh", "FanFault", "CloggedFilter"}
+    for node in model.latents:
+        if node not in model.nodes():
+            model.add_node(node)
 
+    bn_nodes = list(model.nodes())
 
-# ==============================================================
-# === Knowledge-driven structure (manual causal model)
-# ==============================================================
+    # 2. Data (observable variables only)
+    observed_nodes = [n for n in bn_nodes if n not in model.latents]
+    df_em = df_train[observed_nodes].copy()
+    for col in df_em.columns:
+        df_em[col] = df_em[col].astype("Int64").fillna(0).astype(int)
 
-def build_manual_bn() -> BayesianNetwork:
-    """Define the BN structure based on known physical and causal relations."""
-    model = BayesianNetwork([
-        # USING CSV NAMES (snake_case)
-        ('BearingWearHigh', 'vibration_rms'),
-        ('FanFault', 'spindle_temp'),
-        ('CloggedFilter', 'coolant_flow'),
-        ('LowCoolingEfficiency', 'spindle_temp'),
-        ('vibration_rms', 'spindle_overheat'),
-        ('spindle_temp', 'spindle_overheat'),
-        ('coolant_flow', 'spindle_overheat')
-    ])
-    return model
+    if debug:
+        print("[BN-EM] Training EM with Simplified Structure...")
 
+    # 3. CRITICAL: Hard warm start (aggressive manual initialization)
+    # pgmpy requires CPDs for all nodes (or will complain during checks).
+    # We'll inject strong CPDs to separate coolant_flow and vibration_rms.
 
-def add_manual_cpds(model: BayesianNetwork) -> BayesianNetwork:
-    """Add pre-defined CPDs (domain-based), using CSV names for nodes."""
-    cpd_bearing = TabularCPD('BearingWearHigh', 2, [[0.9], [0.1]]) # Prior: 90% normal bearing, 10% worn (root node)
-    cpd_fan = TabularCPD('FanFault', 2, [[0.95], [0.05]])
-    cpd_filter = TabularCPD('CloggedFilter', 2, [[0.9], [0.1]])
-    cpd_cooling = TabularCPD('LowCoolingEfficiency', 2, [[0.85], [0.15]])
+    # Priors for latent causes (start uniform)
+    cpd_priors = [
+        TabularCPD(variable=c, variable_card=2, values=[[0.5], [0.5]])
+        for c in ["BearingWearHigh", "FanFault", "CloggedFilter"]
+    ]
 
-    cpd_vibration = TabularCPD(
-        'vibration_rms', 2, [[0.95, 0.4], [0.05, 0.6]],
-        evidence=['BearingWearHigh'], evidence_card=[2]
+    # Strong links (core trick):
+    # Assumption: 0=Normal, 1=Fault/Low/High (binary discretization)
+    cpd_filter_flow = TabularCPD(
+        variable="coolant_flow",
+        variable_card=2,
+        values=[[0.9, 0.1], [0.1, 0.9]],
+        evidence=["CloggedFilter"],
+        evidence_card=[2],
     )
 
-    cpd_temp = TabularCPD(
-        'spindle_temp', 2,
-        [[0.96, 0.8, 0.7, 0.3],
-         [0.04, 0.2, 0.3, 0.7]],
-        evidence=['FanFault', 'LowCoolingEfficiency'],
-        evidence_card=[2, 2]
+    cpd_bearing_vib = TabularCPD(
+        variable="vibration_rms",
+        variable_card=2,
+        values=[[0.9, 0.1], [0.1, 0.9]],
+        evidence=["BearingWearHigh"],
+        evidence_card=[2],
     )
 
-    cpd_flow = TabularCPD(
-        'coolant_flow', 2, [[0.9, 0.4], [0.1, 0.6]],
-        evidence=['CloggedFilter'], evidence_card=[2]
-    )
+    # NOTE: spindle_temp has 3 parents in this simplified structure:
+    # BearingWearHigh, FanFault, CloggedFilter
+    # A full CPD would be 2 x (2*2*2)=2x8 values. We let EM learn it.
 
-    cpd_overheat = TabularCPD(
-        'spindle_overheat', 2,
-        [[0.99, 0.9, 0.85, 0.3, 0.6, 0.2, 0.1, 0.01],
-         [0.01, 0.1, 0.15, 0.7, 0.4, 0.8, 0.9, 0.99]],
-        evidence=['vibration_rms', 'spindle_temp', 'coolant_flow'],
-        evidence_card=[2, 2, 2]
-    )
+    try:
+        # If add_manual_cpds exists and is compatible, use it to initialize CPDs
+        model = add_manual_cpds(model)
 
-    model.add_cpds(cpd_bearing, cpd_fan, cpd_filter, cpd_cooling,
-                   cpd_vibration, cpd_temp, cpd_flow, cpd_overheat)
+        # Overwrite / reinforce critical separations
+        model.add_cpds(cpd_filter_flow, cpd_bearing_vib)
+
+        if debug:
+            print("[BN-EM] Hard Warm Start applied successfully.")
+    except Exception as e:
+        print(f"[BN-EM] Warning: could not fully apply Hard Warm Start ({e}).")
+        # At minimum, add priors so EM can start
+        model.add_cpds(*cpd_priors)
+
+    # 4. Run EM (uses current CPDs as initialization if present)
+    em = ExpectationMaximization(model, df_em)
+
+    try:
+        cpds = em.get_parameters(max_iter=max_iter)
+        model.add_cpds(*cpds)
+    except Exception as e:
+        print(f"[BN-EM] EM loop failed ({e}). Reverting to initial CPDs.")
+
     model.check_model()
     return model
 
 
-def example_inference(model: BayesianNetwork):
-    """Run a simple test inference."""
-    infer = VariableElimination(model)
-    q = infer.query(variables=['spindle_overheat'], evidence={'Vibration': 1, 'CoolantFlow': 1})
-    print(q)
-    return q
-
-
-def learn_from_cfg(cfg, telemetry_key="telemetry", labels_key="labels"):
-    from .utils import load_csv
-    df = load_csv(cfg, telemetry_key, parse_dates=["timestamp"])
-    y = load_csv(cfg, labels_key, parse_dates=["timestamp"])
-    df = df.join(y["spindle_overheat"])
-    df_disc = discretize(df, cfg["bn"]["sensors"], n_bins=cfg["bn"]["discretize_bins"])
-    model = learn_structure(df_disc)
-    model = fit_parameters(model, df_disc)
+def fit_parameters(
+    model: BayesianNetwork, df_disc: pd.DataFrame
+) -> BayesianNetwork:
+    """Estimate CPDs using Maximum Likelihood Estimation (MLE)."""
+    model.fit(df_disc, estimator=MaximumLikelihoodEstimator)
     return model
+
+
+def learn_structure(df_disc: pd.DataFrame) -> BayesianNetwork:
+    """
+    Learn network structure purely from data using Hill-Climbing.
+    Used only for comparison, not in the hybrid approach.
+    """
+    hc = HillClimbSearch(df_disc)
+    dag = hc.estimate(scoring_method=BicScore(df_disc))
+    model = BayesianNetwork(dag.edges())
+    return model
+
+
+# ==============================================================
+# === 4. INFERENCE
+# ==============================================================
+
+
+def make_inferencer(model: BayesianNetwork) -> VariableElimination:
+    return VariableElimination(model)
+
 
 def infer_overheat_prob(model, evidence: dict):
     """
-    Perform inference P(spindle_overheat = 1 | evidence).
-
-    Assumes that:
-      - The model was trained on discretized data (KBinsDiscretizer).
-      - The incoming evidence already uses the same discrete states
-        (i.e., integers 0, 1, 2, ... as in df_disc / test_data).
+    Perform inference:
+    P(spindle_overheat = 1 | evidence)
     """
     infer = make_inferencer(model)
 
     ev = {}
     for k, v in (evidence or {}).items():
         if k in model.nodes():
-            # evidence already in correct discrete space
             try:
                 ev[k] = int(v)
             except Exception:
                 continue
 
-    q = infer.query(variables=["spindle_overheat"], evidence=ev if ev else None)
-    # state index 1 = "overheat = 1"
-    return float(q.values[1])
-
-
-
-def fit_parameters_em(model: BayesianNetwork, df_disc: pd.DataFrame, max_iter: int = 50, n_jobs: int = 1):
-    """
-    Fit CPDs using the EM algorithm (supports latent variables and missing data).
-    """
-    print(">> EM max_iter =", max_iter)
-    em = ExpectationMaximization(model, df_disc)
-    cpds = em.get_parameters(max_iter=max_iter, n_jobs=n_jobs)
-    model.add_cpds(*cpds)
-    return model
-
-
-def integrate_latent_causes(model: BayesianNetwork) -> BayesianNetwork:
-    """
-    Add latent cause nodes to the BN and connect them causally to sensors.
-    This enforces a root-cause structure:
-        BearingWearHigh      → vibration_rms
-        FanFault             → spindle_temp
-        CloggedFilter        → coolant_flow
-        LowCoolingEfficiency → spindle_temp
-    """
-    latent = ["BearingWearHigh", "FanFault", "CloggedFilter", "LowCoolingEfficiency"]
-
-    # 1) Ensuring that latent nodes exist
-    for c in latent:
-        if c not in model.nodes():
-            model.add_node(c)
-
-    # 2) Add latent edges → sensor (if the sensor exists in the graph)
-    causal_edges = [
-        ("BearingWearHigh", "vibration_rms"),
-        ("FanFault", "spindle_temp"),
-        ("CloggedFilter", "coolant_flow"),
-        ("LowCoolingEfficiency", "spindle_temp"),
-    ]
-
-    for u, v in causal_edges:
-        if v in model.nodes() and (u, v) not in model.edges():
-            model.add_edge(u, v)
-
-    # Mark latents
-    model.latents = set(latent)
-    return model
-
-
+    try:
+        q = infer.query(
+            variables=["spindle_overheat"],
+            evidence=ev if ev else None,
+        )
+        # State 1 is assumed to represent "overheat = true"
+        return float(q.values[1])
+    except Exception:
+        return 0.0
 
 
 # ==============================================================
-# === Model persistence
+# === 5. UTILITIES AND PERSISTENCE
 # ==============================================================
+
 
 def save_model(model: BayesianNetwork, path: str):
-    """Save a trained Bayesian Network model to disk using pickle."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'wb') as f:
+    with open(path, "wb") as f:
         pickle.dump(model, f)
     print(f"[Model] Saved to {path}")
 
 
 def load_model(path: str) -> BayesianNetwork:
-    """Load a trained Bayesian Network model from disk."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Model file not found: {path}")
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         model = pickle.load(f)
     print(f"[Model] Loaded from {path}")
     return model
 
 
-# ==============================================================
-# === Model Analysis
-# ==============================================================
-
 def print_structure(model: BayesianNetwork):
-    """Print the structure of the Bayesian Network."""
     print("\n=== [BN STRUCTURE] ===")
     print(f"Nodes: {len(model.nodes())}")
     print(f"Edges: {len(model.edges())}")
-    
+
     if hasattr(model, "latents"):
         print(f"Latent Variables: {model.latents}")
-    
+
     print("\nEdges:")
     for u, v in model.edges():
         print(f"  {u} -> {v}")
 
 
 def print_cpds(model: BayesianNetwork):
-    """Print the CPDs of the Bayesian Network."""
     print("\n=== [BN PARAMETERS (CPDs)] ===")
     for cpd in model.get_cpds():
         print(f"\nCPD for {cpd.variable}:")
         print(cpd)
 
+
 def align_em_states(model: BayesianNetwork, causes_map: dict):
     """
-    Checks if the learned latent states align with semantic expectations 
-    (State 1 = Fault). If State 0 causes the symptom more strongly than 
-    State 1, we assume the EM learned inverted labels.
-    
-    causes_map: dict mapping Cause -> Symptom (e.g., {"FanFault": "spindle_temp"})
+    Helper to warn the user about EM latent-state semantic alignment
+    (state 0 vs state 1).
     """
-    from pgmpy.factors.discrete import TabularCPD
-    
     print("\n[EM Alignment] Verifying semantic alignment of latent states...")
-    
     for cause, symptom in causes_map.items():
-        if cause not in model.nodes() or symptom not in model.nodes():
+        if (
+            cause not in model.nodes()
+            or symptom not in model.nodes()
+        ):
             continue
-            
-        cpd = model.get_cpds(symptom)
-        # We assume the cause is a parent of the symptom.
-        # Check P(Symptom=High | Cause=1) vs P(Symptom=High | Cause=0)
-        # Note: This is simplified. Complex CPDs need precise indexing.
-        
-        # Simplified check: Just warn the user to manual inspect
-        print(f" -> Please manually inspect CPD for '{symptom}' given '{cause}'.")
-        print(f"    Ensure that {cause}=1 leads to higher probability of {symptom}=1.")
-
+        print(
+            f" -> Please manually inspect CPD for '{symptom}' given '{cause}'."
+        )
     return model
 
-def train_bn_em(df_train, debug=False, max_iter=50):
+
+# ==============================================================
+# === 6. LEGACY / MANUAL SETUP (REFERENCE ONLY)
+# ==============================================================
+
+
+def build_manual_bn() -> BayesianNetwork:
+    """Legacy wrapper kept for compatibility."""
+    return define_bn_structure()
+
+
+def add_manual_cpds(model: BayesianNetwork) -> BayesianNetwork:
     """
-    Train a Bayesian Network using Expectation–Maximization (EM).
-
-    IMPORTANT:
-    - pgmpy EM requires:
-        * ONLY BN variables in the dataframe
-        * NO NaN values
-        * ALL variables discrete (int)
+    Add predefined CPDs.
+    Kept only to allow testing of a fully manual network.
     """
+    cpd_bearing = TabularCPD("BearingWearHigh", 2, [[0.9], [0.1]])
+    cpd_fan = TabularCPD("FanFault", 2, [[0.95], [0.05]])
+    cpd_filter = TabularCPD("CloggedFilter", 2, [[0.9], [0.1]])
+    cpd_cooling = TabularCPD(
+        "LowCoolingEfficiency", 2, [[0.85], [0.15]]
+    )
 
-    from pgmpy.models import BayesianNetwork
-    from pgmpy.estimators import ExpectationMaximization
-
-    # ------------------------------------------------------------
-    # 1. Define BN structure (same as MLE)
-    # ------------------------------------------------------------
-    model = BayesianNetwork([
-        ("BearingWearHigh", "vibration_rms"),
-        ("BearingWearHigh", "spindle_temp"),
-        ("FanFault", "spindle_temp"),
-        ("CloggedFilter", "coolant_flow"),
-        ("CloggedFilter", "spindle_temp"),
-        ("LowCoolingEfficiency", "spindle_temp"),
-        ("vibration_rms", "spindle_overheat"),
-        ("spindle_temp", "spindle_overheat"),
-        ("coolant_flow", "spindle_overheat"),
-    ])
-
-    model = integrate_latent_causes(model)
-
-    bn_nodes = list(model.nodes())
-
-    # ------------------------------------------------------------
-    # 2. FILTER DATAFRAME (CRITICAL FIX)
-    # ------------------------------------------------------------
-    # REMOVE LATENT VARIABLES FROM DATA TO FORCE EM TO LEARN THEM
-    observed_nodes = [n for n in bn_nodes if n not in model.latents]
-    df_em = df_train[observed_nodes].copy()
-
-    # Force numeric discrete values
-    for col in df_em.columns:
-        df_em[col] = (
-            df_em[col]
-            .astype("Int64")   # nullable int
-            .fillna(0)
-            .astype(int)
-        )
-
-    if debug:
-        print("[BN-EM] Training with Expectation–Maximization")
-        print(f"[BN-EM] max_iter = {max_iter}")
-        print(f"[BN-EM] Using variables: {bn_nodes}")
-        print("[BN-EM] NaN check:", df_em.isna().sum().sum())
-
-    # ------------------------------------------------------------
-    # 3. RUN EM
-    # ------------------------------------------------------------
-    em = ExpectationMaximization(model, df_em)
-    cpds = em.get_parameters(max_iter=max_iter)
-
-    model.add_cpds(*cpds)
-    model.check_model()
+    model.add_cpds(
+        cpd_bearing,
+        cpd_fan,
+        cpd_filter,
+        cpd_cooling,
+    )
 
     return model

@@ -152,7 +152,15 @@ def main():
             print("\n" + "=" * 60)
             print(f"Because {reason_str},")
             print(f"the system estimates Overheat Probability = {result['p_overheat']:.2f}.")
-            print(f"Likely cause is {result['top_cause']} ({result['probabilities'].get(result['top_cause'], 0):.1%}).")
+            top_cause = result['top_cause']
+            raw_prob = result['probabilities'].get(top_cause, 0)
+            total_prob = sum(result['probabilities'].values())
+            # Evitar divisão por zero
+            if total_prob > 0:
+                relative_conf = raw_prob / total_prob
+            else:
+                relative_conf = 0.0
+            print(f"Likely cause is {top_cause} (Confidence: {relative_conf:.1%}).")
             print(f"Recommended action: {result['recommended_action']}")
             print(f"Procedure: {proc_str}")
             print("=" * 60 + "\n")

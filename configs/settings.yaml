@@ -25,8 +25,14 @@ bn:
   # Apenas os sensores usados na rede
   sensors: [
     "spindle_temp",
+    "ambient_temp",
     "vibration_rms",
-    "coolant_flow"
+    "coolant_flow",
+    "feed_rate",
+    "spindle_speed",
+    "load_pct",
+    "power_kw",
+    "tool_wear"
   ]
 
 decision:
